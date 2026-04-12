@@ -1,0 +1,31 @@
+[package]
+name = "agnt"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["doop"]
+description = "A dense, sync-first Rust agent engine — multi-backend inference, parallel tool dispatch, SQLite persistence, streaming. Flagship meta-crate."
+repository = "https://github.com/hmbldv/agnt"
+homepage = "https://github.com/hmbldv/agnt"
+documentation = "https://docs.rs/agnt"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["agent", "llm", "ai", "ollama", "anthropic"]
+categories = ["api-bindings"]
+
+[lib]
+name = "agnt"
+path = "src/lib.rs"
+
+[features]
+default = ["net", "store", "tools"]
+net = ["dep:agnt-net"]
+store = ["dep:agnt-store"]
+tools = ["dep:agnt-tools"]
+tools-shell = ["tools", "agnt-tools/shell"]
+
+[dependencies]
+agnt-core = { version = "0.2", path = "../agnt-core" }
+agnt-net = { version = "0.2", path = "../agnt-net", optional = true }
+agnt-store = { version = "0.2", path = "../agnt-store", optional = true }
+agnt-tools = { version = "0.2", path = "../agnt-tools", optional = true }

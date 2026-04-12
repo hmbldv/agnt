@@ -1,43 +1,29 @@
+//! The [`Tool`] trait — agent-callable capabilities.
+//!
+//! The current (v0.1-compatible) signature uses `serde_json::Value` for args
+//! and `String` for output. v0.2 Phase 1 will introduce a typed variant
+//! (`TypedTool` with associated `Args`/`Output`/`Error` types) alongside this
+//! one, with an `ErasedTool` adapter bridging typed impls into the dyn path.
+//!
+//! See v0.2 plan doc Work Item A1.
+
 use serde_json::Value;
 
 /// A tool the agent can invoke.
-///
-/// Implement this trait to give the agent a capability. Each tool has a name,
-/// a human-readable description (shown to the model), a JSON schema for its
-/// arguments, and a synchronous `call` method.
-///
-/// # Example
-///
-/// ```
-/// use agnt::Tool;
-/// use serde_json::{json, Value};
-///
-/// struct UpperCase;
-/// impl Tool for UpperCase {
-///     fn name(&self) -> &str { "uppercase" }
-///     fn description(&self) -> &str { "Uppercase a string." }
-///     fn schema(&self) -> Value {
-///         json!({
-///             "type": "object",
-///             "properties": { "text": { "type": "string" } },
-///             "required": ["text"]
-///         })
-///     }
-///     fn call(&self, args: Value) -> Result<String, String> {
-///         Ok(args["text"].as_str().unwrap_or("").to_uppercase())
-///     }
-/// }
-/// ```
 pub trait Tool: Send + Sync {
     /// The tool's name — used by the model to invoke it and for dispatch.
     fn name(&self) -> &str;
-    /// Human-readable description sent to the model. This is the primary way
-    /// to steer tool selection; a good description dramatically improves
-    /// model behavior.
+
+    /// Human-readable description sent to the model as part of the tool list.
+    /// This is the primary steering mechanism for tool selection.
     fn description(&self) -> &str;
+
     /// JSON Schema describing the tool's arguments.
     fn schema(&self) -> Value;
-    /// Execute the tool. Return a string result or an error message.
+
+    /// Execute the tool synchronously. Return a string result or an error
+    /// message. Callers must enforce result-byte caps and envelope framing
+    /// before persisting or feeding back to the model.
     fn call(&self, args: Value) -> Result<String, String>;
 }
 

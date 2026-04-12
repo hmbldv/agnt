@@ -1,0 +1,33 @@
+[package]
+name = "agnt-tools"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["doop"]
+description = "Built-in tools for the agnt agent runtime — filesystem, search, fetch, shell. Sandbox-aware."
+repository = "https://github.com/hmbldv/agnt"
+homepage = "https://github.com/hmbldv/agnt"
+documentation = "https://docs.rs/agnt-tools"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["agent", "llm", "tools"]
+categories = ["api-bindings"]
+
+[lib]
+name = "agnt_tools"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Shell tool is opt-in — requires explicit sandbox configuration.
+# CVE-class capability: read the v0.2 threat model before enabling.
+shell = []
+
+[dependencies]
+agnt-core = { version = "0.2", path = "../agnt-core" }
+ureq = { version = "2.12", default-features = false, features = ["json", "native-tls", "gzip"] }
+native-tls = "0.2"
+serde_json = "1"
+glob = "0.3"
+walkdir = "2.5"
+regex = "1.10"

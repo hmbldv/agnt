@@ -10,24 +10,61 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agnt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "glob",
+ "agnt-core",
+ "agnt-net",
+ "agnt-store",
+ "agnt-tools",
+]
+
+[[package]]
+name = "agnt-core"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agnt-net"
+version = "0.2.0"
+dependencies = [
+ "agnt-core",
  "native-tls",
- "regex",
- "rusqlite",
  "serde",
  "serde_json",
  "ureq",
- "walkdir",
 ]
 
 [[package]]
 name = "agnt-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnt",
  "serde_json",
+]
+
+[[package]]
+name = "agnt-store"
+version = "0.2.0"
+dependencies = [
+ "agnt-core",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "agnt-tools"
+version = "0.2.0"
+dependencies = [
+ "agnt-core",
+ "glob",
+ "native-tls",
+ "regex",
+ "serde_json",
+ "ureq",
+ "walkdir",
 ]
 
 [[package]]

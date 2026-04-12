@@ -1,14 +1,21 @@
 [workspace]
-members = ["agnt-core", "."]
+members = [
+    "crates/agnt-core",
+    "crates/agnt-net",
+    "crates/agnt-store",
+    "crates/agnt-tools",
+    "crates/agnt",
+    ".",
+]
 
 [package]
 name = "agnt-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Smallest dense Rust agent — iterate modules into this"
+description = "REPL binary example consumer of the agnt library"
 
 [dependencies]
-agnt = { path = "agnt-core" }
+agnt = { path = "crates/agnt" }
 serde_json = "1"
 
 [profile.release]

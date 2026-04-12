@@ -1,8 +1,18 @@
-use crate::backend::Message;
+use agnt_core::{Message, MessageStore, StoreError, ToolLog};
 use rusqlite::{params, Connection};
+use std::sync::Mutex;
 
+fn io_err(e: impl std::fmt::Display) -> StoreError {
+    StoreError::Io(e.to_string())
+}
+
+/// SQLite-backed session store.
+///
+/// Wraps `rusqlite::Connection` in a `Mutex` so the store is `Send + Sync`
+/// and can be shared across threads without the caller needing to add their
+/// own interior mutability.
 pub struct Store {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Store {
@@ -30,7 +40,15 @@ impl Store {
             [],
         )
         .map_err(|e| e.to_string())?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
+        self.conn
+            .lock()
+            .map_err(|e| format!("store mutex poisoned: {}", e))
     }
 
     pub fn log_tool(
@@ -45,19 +63,19 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.conn
-            .execute(
-                "INSERT INTO tool_calls (session, ts, name, args, result, duration_us)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![session, ts, name, args, result, duration_us as i64],
-            )
-            .map_err(|e| e.to_string())?;
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO tool_calls (session, ts, name, args, result, duration_us)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session, ts, name, args, result, duration_us as i64],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn load(&self, session: &str) -> Result<Vec<Message>, String> {
-        let mut stmt = self
-            .conn
+        let conn = self.lock()?;
+        let mut stmt = conn
             .prepare("SELECT json FROM messages WHERE session = ?1 ORDER BY idx")
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -73,8 +91,8 @@ impl Store {
     }
 
     pub fn append(&self, session: &str, msg: &Message) -> Result<(), String> {
-        let n: i64 = self
-            .conn
+        let conn = self.lock()?;
+        let n: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(idx), -1) + 1 FROM messages WHERE session = ?1",
                 params![session],
@@ -82,35 +100,33 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         let json = serde_json::to_string(msg).map_err(|e| e.to_string())?;
-        self.conn
-            .execute(
-                "INSERT INTO messages (session, idx, json) VALUES (?1, ?2, ?3)",
-                params![session, n, json],
-            )
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO messages (session, idx, json) VALUES (?1, ?2, ?3)",
+            params![session, n, json],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn clear(&self, session: &str) -> Result<(), String> {
-        self.conn
-            .execute(
-                "DELETE FROM messages WHERE session = ?1",
-                params![session],
-            )
-            .map_err(|e| e.to_string())?;
-        self.conn
-            .execute(
-                "DELETE FROM tool_calls WHERE session = ?1",
-                params![session],
-            )
-            .map_err(|e| e.to_string())?;
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM messages WHERE session = ?1",
+            params![session],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM tool_calls WHERE session = ?1",
+            params![session],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     /// Per-tool latency stats for a session: (name, count, avg_us, max_us).
     pub fn stats(&self, session: &str) -> Result<Vec<(String, i64, i64, i64)>, String> {
-        let mut stmt = self
-            .conn
+        let conn = self.lock()?;
+        let mut stmt = conn
             .prepare(
                 "SELECT name, COUNT(*), CAST(AVG(duration_us) AS INTEGER), MAX(duration_us)
                  FROM tool_calls
@@ -130,5 +146,24 @@ impl Store {
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+}
+
+impl MessageStore for Store {
+    fn load(&self, session: &str) -> Result<Vec<Message>, StoreError> {
+        Store::load(self, session).map_err(io_err)
+    }
+
+    fn append(&self, session: &str, message: &Message) -> Result<(), StoreError> {
+        Store::append(self, session, message).map_err(io_err)
+    }
+
+    fn log_tool(&self, session: &str, log: &ToolLog<'_>) -> Result<(), StoreError> {
+        Store::log_tool(self, session, log.name, log.args, log.result, log.duration_us)
+            .map_err(io_err)
+    }
+
+    fn clear(&self, session: &str) -> Result<(), StoreError> {
+        Store::clear(self, session).map_err(io_err)
     }
 }

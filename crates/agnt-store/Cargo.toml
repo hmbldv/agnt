@@ -1,0 +1,23 @@
+[package]
+name = "agnt-store"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["doop"]
+description = "SQLite message store for the agnt agent runtime — bundled SQLite, session log with microsecond tool profiling."
+repository = "https://github.com/hmbldv/agnt"
+homepage = "https://github.com/hmbldv/agnt"
+documentation = "https://docs.rs/agnt-store"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["agent", "llm", "sqlite", "persistence"]
+categories = ["api-bindings", "database"]
+
+[lib]
+name = "agnt_store"
+path = "src/lib.rs"
+
+[dependencies]
+agnt-core = { version = "0.2", path = "../agnt-core" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"

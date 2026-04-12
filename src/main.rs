@@ -1,7 +1,6 @@
-use agnt::agent::Agent;
-use agnt::backend::Backend;
-use agnt::{builtins, store, tool};
+use agnt::{Agent, Backend, MessageStore, Tool, builtins, store};
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 
 const DEFAULT_SYSTEM: &str = "You are a helpful, concise assistant. When you need to act on files, directories, URLs, or search for text, PREFER the specialized tools (read_file, write_file, edit_file, list_dir, glob, grep, fetch) over the shell tool — they are faster, deterministic, and sub-millisecond. Only reach for shell when no specialized tool fits (e.g. git, cargo, systemctl, kubectl).";
 
@@ -61,10 +60,17 @@ fn main() {
     let mut agent = Agent::new(backend, &system);
     agent.stream = !no_stream;
 
+    // Keep a concrete Arc<Store> around so /stats can call the concrete
+    // `stats()` method (not part of the MessageStore trait).
+    let mut concrete_store: Option<Arc<store::Store>> = None;
+
     if !no_db {
         match store::Store::open(&db_path) {
             Ok(s) => {
-                if let Err(e) = agent.attach_store(s, &session) {
+                let arc = Arc::new(s);
+                concrete_store = Some(arc.clone());
+                let trait_obj: Arc<dyn MessageStore> = arc;
+                if let Err(e) = agent.attach_store(trait_obj, &session) {
                     eprintln!("store attach: {}", e);
                 }
             }
@@ -73,7 +79,7 @@ fn main() {
     }
 
     let unsafe_shell = std::env::var("AGNT_UNSAFE_SHELL").is_ok();
-    let all_tools: Vec<Box<dyn tool::Tool>> = vec![
+    let all_tools: Vec<Box<dyn Tool>> = vec![
         Box::new(builtins::ReadFile),
         Box::new(builtins::WriteFile),
         Box::new(builtins::EditFile),
@@ -124,7 +130,7 @@ fn main() {
             continue;
         }
         if line == "/stats" {
-            match &agent.store {
+            match &concrete_store {
                 Some(s) => match s.stats(&agent.session) {
                     Ok(rows) if rows.is_empty() => println!("(no tool calls in this session yet)"),
                     Ok(rows) => {

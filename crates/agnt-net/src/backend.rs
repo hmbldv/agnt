@@ -1,39 +1,8 @@
-use serde::{Deserialize, Serialize};
+use agnt_core::{BackendError, FunctionCall, LlmBackend, Message, ToolCall};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
 use std::thread;
 use std::time::Duration;
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Message {
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ToolCall {
-    pub id: String,
-    #[serde(rename = "type", default = "default_tc_type")]
-    pub call_type: String,
-    pub function: FunctionCall,
-}
-
-fn default_tc_type() -> String {
-    "function".into()
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FunctionCall {
-    pub name: String,
-    pub arguments: String,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -49,8 +18,8 @@ pub enum Kind {
 ///
 /// # Example
 ///
-/// ```
-/// use agnt::Backend;
+/// ```no_run
+/// use agnt_net::Backend;
 ///
 /// let ollama = Backend::ollama("gemma4:e4b");
 /// let openai = Backend::openai("gpt-4o-mini", "sk-...");
@@ -542,4 +511,22 @@ fn parse_anthropic_stream(
         tool_call_id: None,
         name: None,
     })
+}
+
+impl LlmBackend for Backend {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn chat(
+        &self,
+        messages: &[Message],
+        tools: &Value,
+        on_token: Option<&mut dyn FnMut(&str)>,
+    ) -> Result<Message, BackendError> {
+        // Delegate to the inherent method and map String errors into
+        // BackendError::Provider. Leg 2 refinements (error taxonomy at
+        // source) land in v0.2 Phase 1.
+        Backend::chat(self, messages, tools, on_token).map_err(BackendError::Provider)
+    }
 }
