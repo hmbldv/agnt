@@ -1,0 +1,28 @@
+[package]
+name = "agnt"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["doop"]
+description = "A dense, sync-first Rust agent engine — multi-backend inference, parallel tool dispatch, SQLite persistence, streaming"
+repository = "https://github.com/hmbldv/agnt"
+homepage = "https://github.com/hmbldv/agnt"
+documentation = "https://docs.rs/agnt"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["agent", "llm", "ai", "ollama", "anthropic"]
+categories = ["api-bindings"]
+
+[lib]
+name = "agnt"
+path = "src/lib.rs"
+
+[dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json", "native-tls", "gzip"] }
+native-tls = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+glob = "0.3"
+walkdir = "2.5"
+regex = "1.10"

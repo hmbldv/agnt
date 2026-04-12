@@ -1,0 +1,17 @@
+[workspace]
+members = ["agnt-core", "."]
+
+[package]
+name = "agnt-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Smallest dense Rust agent — iterate modules into this"
+
+[dependencies]
+agnt = { path = "agnt-core" }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
