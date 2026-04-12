@@ -79,6 +79,30 @@ Read the full [threat model](https://github.com/hmbldv/agnt/blob/main/THREAT_MOD
 
 ## Performance posture (v0.2)
 
+### Measured (criterion, RTX 5090 host)
+
+`Agent::step` end-to-end against a mock backend — this is the pure loop
+overhead with zero LLM latency. In real use the ~2-second LLM inference
+dominates; these numbers show the agent loop is effectively free.
+
+| Prior history | `Agent::step` cost |
+|---|---|
+| 0 messages (cold) | ~479 ns |
+| 10 messages | ~479 ns |
+| 39 (borrow path, just-fits window) | ~3.4 µs |
+| 40 (truncation path triggered) | ~3.5 µs |
+| 100 messages | ~5.0 µs |
+| 500 messages | ~13.4 µs |
+| 1000 messages | ~24.2 µs |
+
+At 1000-message history the loop costs 24 microseconds per step. A single
+inference turn is ~2,000,000 microseconds. **The loop is 0.001% of the
+step cost.**
+
+Run it yourself: `cargo bench -p agnt-core`.
+
+### v0.1 → v0.2 improvements
+
 | Operation | v0.1 | v0.2 | Notes |
 |---|---|---|---|
 | `Agent::step` (short history) | full clone of all messages | zero clones, borrows directly | P1 |
