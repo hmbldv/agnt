@@ -35,4 +35,4 @@ pub use backend_trait::{BackendError, LlmBackend};
 pub use message::{FunctionCall, Message, ToolCall};
 pub use observer::{Observer, ToolResult};
 pub use store_trait::{MessageStore, StoreError, ToolLog};
-pub use tool::{Registry, Tool};
+pub use tool::{ErasedAdapter, Registry, Tool, TypedTool};

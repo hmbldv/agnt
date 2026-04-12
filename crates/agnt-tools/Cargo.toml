@@ -31,3 +31,10 @@ serde_json = "1"
 glob = "0.3"
 walkdir = "2.5"
 regex = "1.10"
+# S1: shell-words for the (opt-in) Shell tool — parses cmd strings into argv
+# without invoking sh -c, so there is no command-substitution surface.
+shell-words = "1.1"
+# S3: url parsing + SSRF guard on Fetch
+url = "2.5"
+# S6: file locking for EditFile TOCTOU fix
+fs2 = "0.4"

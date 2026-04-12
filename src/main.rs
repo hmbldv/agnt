@@ -58,7 +58,19 @@ fn main() {
     };
 
     let mut agent = Agent::new(backend, &system);
-    agent.stream = !no_stream;
+    // v0.2 A8: prefer the on_token callback over the deprecated `stream` bool.
+    // When streaming is enabled, push tokens directly to stdout via the sink.
+    if !no_stream {
+        agent.on_token = Some(Box::new(|tok: &str| {
+            use std::io::Write;
+            print!("{}", tok);
+            std::io::stdout().flush().ok();
+        }));
+    }
+    #[allow(deprecated)]
+    {
+        agent.stream = false;
+    }
 
     // Keep a concrete Arc<Store> around so /stats can call the concrete
     // `stats()` method (not part of the MessageStore trait).
@@ -78,16 +90,18 @@ fn main() {
         }
     }
 
-    let unsafe_shell = std::env::var("AGNT_UNSAFE_SHELL").is_ok();
+    // v0.2: Shell is opt-in via the `shell` cargo feature and requires an
+    // explicit sandbox config. The REPL no longer constructs it here — enable
+    // the feature and wire your own Shell::new_sandboxed(...) to restore it.
+    let _ = std::env::var("AGNT_UNSAFE_SHELL").is_ok();
     let all_tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(builtins::ReadFile),
-        Box::new(builtins::WriteFile),
-        Box::new(builtins::EditFile),
-        Box::new(builtins::ListDir),
-        Box::new(builtins::Glob),
-        Box::new(builtins::Grep),
-        Box::new(builtins::Fetch),
-        Box::new(builtins::Shell { unsafe_mode: unsafe_shell }),
+        Box::new(builtins::ReadFile::new()),
+        Box::new(builtins::WriteFile::new()),
+        Box::new(builtins::EditFile::new()),
+        Box::new(builtins::ListDir::new()),
+        Box::new(builtins::Glob::new()),
+        Box::new(builtins::Grep::new()),
+        Box::new(builtins::Fetch::new()),
     ];
     for t in all_tools {
         if let Some(list) = &tool_allowlist {
@@ -145,9 +159,10 @@ fn main() {
             }
             continue;
         }
+        let streaming = agent.on_token.is_some();
         match agent.step(&line) {
             Ok(out) => {
-                if !agent.stream && !out.is_empty() {
+                if !streaming && !out.is_empty() {
                     println!("{}", out);
                 }
             }

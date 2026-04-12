@@ -12,7 +12,7 @@
 //! let backend = Backend::ollama("gemma4:e4b");
 //! let mut agent = Agent::new(backend, "You are a helpful assistant.");
 //! # #[cfg(feature = "tools")]
-//! agent.tools.register(Box::new(agnt::builtins::ReadFile));
+//! agent.tools.register(Box::new(agnt::builtins::ReadFile::new()));
 //!
 //! let reply = agent.step("Read /etc/hostname and tell me the hostname.").unwrap();
 //! println!("{}", reply);

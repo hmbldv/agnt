@@ -1,8 +1,9 @@
 use agnt_core::{BackendError, FunctionCall, LlmBackend, Message, ToolCall};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -32,9 +33,28 @@ pub struct Backend {
     /// Base URL for the provider's API.
     pub base_url: String,
     /// Optional API key. `None` for local Ollama.
-    pub api_key: Option<String>,
+    api_key: Option<String>,
     /// Model identifier passed in every request.
     pub model: String,
+    /// Optional dedicated ureq Agent. When `None`, the process-wide shared
+    /// Agent (with default timeouts) is used.
+    agent: Option<Arc<ureq::Agent>>,
+}
+
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.kind {
+            Kind::Openai => "Openai",
+            Kind::Anthropic => "Anthropic",
+        };
+        f.debug_struct("Backend")
+            .field("kind", &kind)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .field("agent", &self.agent.as_ref().map(|_| "<custom>"))
+            .finish()
+    }
 }
 
 impl Backend {
@@ -47,6 +67,7 @@ impl Backend {
             base_url: "http://localhost:11434/v1".into(),
             api_key: None,
             model: model.into(),
+            agent: None,
         }
     }
     /// Create a backend for OpenAI's API.
@@ -56,6 +77,7 @@ impl Backend {
             base_url: "https://api.openai.com/v1".into(),
             api_key: Some(api_key.into()),
             model: model.into(),
+            agent: None,
         }
     }
     /// Create a backend for Anthropic's native API.
@@ -69,7 +91,22 @@ impl Backend {
             base_url: "https://api.anthropic.com/v1".into(),
             api_key: Some(api_key.into()),
             model: model.into(),
+            agent: None,
         }
+    }
+
+    /// Override the HTTP timeouts for this backend instance.
+    ///
+    /// Builds a fresh ureq Agent with the supplied connect/read timeouts and
+    /// attaches it to this [`Backend`]. Subsequent requests made via this
+    /// instance will use the custom Agent instead of the process-wide shared
+    /// one.
+    ///
+    /// Returns an error if TLS initialization fails.
+    pub fn with_timeouts(mut self, connect: Duration, read: Duration) -> Result<Self, String> {
+        let agent = crate::http::build_agent(connect, read)?;
+        self.agent = Some(Arc::new(agent));
+        Ok(self)
     }
 
     pub fn chat(
@@ -84,10 +121,12 @@ impl Backend {
         }
     }
 
-    fn build_request(&self, url: &str) -> ureq::Request {
-        let mut req = crate::http::agent()
-            .post(url)
-            .set("Content-Type", "application/json");
+    fn build_request(&self, url: &str) -> Result<ureq::Request, String> {
+        let agent: &ureq::Agent = match &self.agent {
+            Some(a) => a.as_ref(),
+            None => crate::http::agent()?,
+        };
+        let mut req = agent.post(url).set("Content-Type", "application/json");
         if let Some(k) = &self.api_key {
             match self.kind {
                 Kind::Openai => {
@@ -100,7 +139,7 @@ impl Backend {
                 }
             }
         }
-        req
+        Ok(req)
     }
 
     fn chat_openai(
@@ -120,10 +159,20 @@ impl Backend {
             body["stream"] = Value::Bool(true);
         }
 
-        let resp = with_retry(5, || self.build_request(&url).send_json(body.clone()))?;
+        // Serialize the body exactly once before entering the retry loop so
+        // we don't clone a fresh JSON `Value` on every attempt.
+        let body_bytes =
+            serde_json::to_vec(&body).map_err(|e| format!("encode body: {}", e))?;
+        let body_slice: &[u8] = &body_bytes;
+
+        let resp = with_retry(5, || {
+            self.build_request(&url)?
+                .send_bytes(body_slice)
+                .map_err(RetryError::from)
+        })?;
 
         if let Some(sink) = sink {
-            parse_openai_stream(resp, sink)
+            parse_openai_stream(resp.into_reader(), sink)
         } else {
             let v: Value = resp.into_json().map_err(|e| format!("decode: {}", e))?;
             let msg = v
@@ -171,10 +220,18 @@ impl Backend {
             body["stream"] = Value::Bool(true);
         }
 
-        let resp = with_retry(5, || self.build_request(&url).send_json(body.clone()))?;
+        let body_bytes =
+            serde_json::to_vec(&body).map_err(|e| format!("encode body: {}", e))?;
+        let body_slice: &[u8] = &body_bytes;
+
+        let resp = with_retry(5, || {
+            self.build_request(&url)?
+                .send_bytes(body_slice)
+                .map_err(RetryError::from)
+        })?;
 
         if let Some(sink) = sink {
-            parse_anthropic_stream(resp, sink)
+            parse_anthropic_stream(resp.into_reader(), sink)
         } else {
             let v: Value = resp.into_json().map_err(|e| format!("decode: {}", e))?;
             from_anthropic_response(&v)
@@ -182,34 +239,119 @@ impl Backend {
     }
 }
 
-fn with_retry(
-    max: u32,
-    f: impl Fn() -> Result<ureq::Response, ureq::Error>,
-) -> Result<ureq::Response, String> {
-    let mut delay = 500u64;
+/// Internal error type for the retry loop — distinguishes a failure to build
+/// the request (e.g. TLS init) from a ureq transport/status error.
+enum RetryError {
+    Build(String),
+    Ureq(ureq::Error),
+}
+
+impl From<ureq::Error> for RetryError {
+    fn from(e: ureq::Error) -> Self {
+        RetryError::Ureq(e)
+    }
+}
+
+impl From<String> for RetryError {
+    fn from(e: String) -> Self {
+        RetryError::Build(e)
+    }
+}
+
+/// Strip sensitive headers from an error body before it bubbles up.
+///
+/// Upstream providers sometimes echo request headers back in verbose error
+/// payloads. We redact the two we know carry secrets so they never end up in
+/// logs.
+fn redact_secrets(s: &str) -> String {
+    // Line-based replacement is good enough for SSE-style payloads; we also
+    // handle single-line JSON with inline header strings.
+    let mut out = String::with_capacity(s.len());
+    for line in s.split_inclusive('\n') {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("authorization") || lower.contains("x-api-key") {
+            // Drop bearer token / api key values after the header name.
+            // A conservative redaction: replace the whole line.
+            out.push_str("[redacted header]\n");
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Simple xorshift64* PRNG seeded from the wall clock. We only use this for
+/// retry jitter so quality is not critical — we just want each process (and
+/// ideally each retry) to pick a different multiplier.
+fn xorshift_jitter(state: &mut u64) -> f64 {
+    if *state == 0 {
+        *state = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E3779B97F4A7C15)
+            .wrapping_add(1);
+    }
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    // Map into [-1.0, 1.0).
+    let frac = ((x >> 11) as f64) / ((1u64 << 53) as f64);
+    frac * 2.0 - 1.0
+}
+
+/// Apply ±20% jitter to a base delay in milliseconds.
+fn jittered(base_ms: u64, rng_state: &mut u64) -> u64 {
+    let j = xorshift_jitter(rng_state); // [-1, 1)
+    let delta = (base_ms as f64) * 0.20 * j;
+    let adjusted = (base_ms as f64 + delta).max(0.0);
+    adjusted as u64
+}
+
+fn with_retry<F>(max: u32, mut f: F) -> Result<ureq::Response, String>
+where
+    F: FnMut() -> Result<ureq::Response, RetryError>,
+{
+    if max == 0 {
+        return Err("with_retry: max must be >= 1".into());
+    }
+    let mut base_delay = 500u64;
+    let mut rng_state = 0u64;
+    let mut last_err: Option<String> = None;
     for i in 0..max {
         match f() {
             Ok(r) => return Ok(r),
-            Err(ureq::Error::Status(code, r)) => {
-                if (code == 429 || code >= 500) && i + 1 < max {
-                    thread::sleep(Duration::from_millis(delay));
-                    delay = (delay * 2).min(8000);
+            Err(RetryError::Build(e)) => {
+                // A build failure (e.g. TLS init) is not worth retrying.
+                return Err(e);
+            }
+            Err(RetryError::Ureq(ureq::Error::Status(code, r))) => {
+                let retryable = code == 429 || code >= 500;
+                if retryable && i + 1 < max {
+                    let sleep_ms = jittered(base_delay, &mut rng_state);
+                    thread::sleep(Duration::from_millis(sleep_ms));
+                    base_delay = (base_delay * 2).min(8000);
                     continue;
                 }
                 let body = r.into_string().unwrap_or_default();
-                return Err(format!("http {}: {}", code, body));
+                return Err(redact_secrets(&format!("http {}: {}", code, body)));
             }
-            Err(ureq::Error::Transport(t)) => {
+            Err(RetryError::Ureq(ureq::Error::Transport(t))) => {
+                last_err = Some(format!("transport: {}", t));
                 if i + 1 < max {
-                    thread::sleep(Duration::from_millis(delay));
-                    delay = (delay * 2).min(8000);
+                    let sleep_ms = jittered(base_delay, &mut rng_state);
+                    thread::sleep(Duration::from_millis(sleep_ms));
+                    base_delay = (base_delay * 2).min(8000);
                     continue;
                 }
-                return Err(format!("transport: {}", t));
+                return Err(redact_secrets(last_err.as_deref().unwrap_or("transport: unknown")));
             }
         }
     }
-    unreachable!()
+    Err(redact_secrets(
+        last_err.as_deref().unwrap_or("with_retry: exhausted"),
+    ))
 }
 
 fn to_anthropic_messages(msgs: &[Message]) -> (String, Vec<Value>) {
@@ -336,16 +478,35 @@ fn from_anthropic_response(v: &Value) -> Result<Message, String> {
     })
 }
 
-fn parse_openai_stream(
-    resp: ureq::Response,
+/// Read one line from the reader into `buf` (cleared first), stripping a
+/// trailing `\n` and optional `\r`. Returns `Ok(false)` at EOF.
+fn read_sse_line<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Result<bool> {
+    buf.clear();
+    let n = reader.read_line(buf)?;
+    if n == 0 {
+        return Ok(false);
+    }
+    if buf.ends_with('\n') {
+        buf.pop();
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
+    }
+    Ok(true)
+}
+
+fn parse_openai_stream<R: Read>(
+    resp: R,
     sink: &mut dyn FnMut(&str),
 ) -> Result<Message, String> {
-    let reader = BufReader::new(resp.into_reader());
+    // Generic over `R: Read` so tests can feed a `&[u8]` and production can
+    // pass `ureq::Response::into_reader()`.
+    let mut reader = BufReader::new(resp);
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut line = String::new();
 
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("stream: {}", e))?;
+    while read_sse_line(&mut reader, &mut line).map_err(|e| format!("stream: {}", e))? {
         let data = match line.strip_prefix("data: ") {
             Some(d) => d,
             None => continue,
@@ -413,16 +574,16 @@ fn parse_openai_stream(
     })
 }
 
-fn parse_anthropic_stream(
-    resp: ureq::Response,
+fn parse_anthropic_stream<R: Read>(
+    resp: R,
     sink: &mut dyn FnMut(&str),
 ) -> Result<Message, String> {
-    let reader = BufReader::new(resp.into_reader());
+    let mut reader = BufReader::new(resp);
     let mut text = String::new();
     let mut blocks: Vec<(String, String, String, String)> = Vec::new();
+    let mut line = String::new();
 
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("stream: {}", e))?;
+    while read_sse_line(&mut reader, &mut line).map_err(|e| format!("stream: {}", e))? {
         let data = match line.strip_prefix("data: ") {
             Some(d) => d,
             None => continue,
@@ -435,19 +596,20 @@ fn parse_anthropic_stream(
         match t {
             "content_block_start" => {
                 let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                let block = ev.get("content_block").cloned().unwrap_or(Value::Null);
+                // Borrow the content_block in place instead of cloning it.
+                let block = ev.get("content_block");
                 let btype = block
-                    .get("type")
+                    .and_then(|b| b.get("type"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("")
                     .to_string();
                 let id = block
-                    .get("id")
+                    .and_then(|b| b.get("id"))
                     .and_then(|i| i.as_str())
                     .unwrap_or("")
                     .to_string();
                 let name = block
-                    .get("name")
+                    .and_then(|b| b.get("name"))
                     .and_then(|i| i.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -458,17 +620,26 @@ fn parse_anthropic_stream(
             }
             "content_block_delta" => {
                 let idx = ev.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                let delta = ev.get("delta").cloned().unwrap_or(Value::Null);
-                let dtype = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                // Borrow the delta in place instead of cloning it.
+                let delta = ev.get("delta");
+                let dtype = delta
+                    .and_then(|d| d.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
                 match dtype {
                     "text_delta" => {
-                        if let Some(t) = delta.get("text").and_then(|t| t.as_str()) {
+                        if let Some(t) =
+                            delta.and_then(|d| d.get("text")).and_then(|t| t.as_str())
+                        {
                             text.push_str(t);
                             sink(t);
                         }
                     }
                     "input_json_delta" => {
-                        if let Some(p) = delta.get("partial_json").and_then(|p| p.as_str()) {
+                        if let Some(p) = delta
+                            .and_then(|d| d.get("partial_json"))
+                            .and_then(|p| p.as_str())
+                        {
                             if let Some(slot) = blocks.get_mut(idx) {
                                 slot.3.push_str(p);
                             }
@@ -528,5 +699,107 @@ impl LlmBackend for Backend {
         // BackendError::Provider. Leg 2 refinements (error taxonomy at
         // source) land in v0.2 Phase 1.
         Backend::chat(self, messages, tools, on_token).map_err(BackendError::Provider)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_impl_redacts_api_key() {
+        let b = Backend::openai("gpt-4o-mini", "sk-super-secret-key");
+        let s = format!("{:?}", b);
+        assert!(s.contains("<redacted>"), "debug output: {}", s);
+        assert!(
+            !s.contains("sk-super-secret-key"),
+            "secret leaked in debug output: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn redact_secrets_strips_auth_headers() {
+        let raw = "line1\nAuthorization: Bearer sk-xyz\nx-api-key: abc\nother\n";
+        let out = redact_secrets(raw);
+        assert!(!out.contains("sk-xyz"));
+        assert!(!out.contains("abc"));
+        assert!(out.contains("line1"));
+        assert!(out.contains("other"));
+    }
+
+    #[test]
+    fn with_retry_zero_max_returns_err_not_panic() {
+        let r: Result<ureq::Response, String> =
+            with_retry(0, || unreachable!("should not be called"));
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("max must be >= 1"));
+    }
+
+    #[test]
+    fn with_retry_build_error_is_not_retried() {
+        let mut calls = 0u32;
+        let r: Result<ureq::Response, String> = with_retry(5, || {
+            calls += 1;
+            Err(RetryError::Build("tls init blew up".into()))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, 1, "build errors must not be retried");
+    }
+
+    #[test]
+    fn jitter_stays_within_bounds() {
+        let mut state = 1u64;
+        for _ in 0..1000 {
+            let j = jittered(1000, &mut state);
+            assert!(j <= 1200, "j={}", j);
+            // Lower bound: 1000 - 200 = 800, but floor is 0.
+            assert!(j >= 800, "j={}", j);
+        }
+    }
+
+    #[test]
+    fn openai_stream_parses_content_and_tool_call() {
+        let data = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n",
+            "data: [DONE]\n",
+        );
+        let mut captured = String::new();
+        let msg = {
+            let mut sink = |s: &str| captured.push_str(s);
+            parse_openai_stream(data.as_bytes(), &mut sink).unwrap()
+        };
+        assert_eq!(captured, "hello");
+        assert_eq!(msg.content.as_deref(), Some("hello"));
+        let tcs = msg.tool_calls.expect("tool_calls");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "call_1");
+        assert_eq!(tcs[0].function.name, "f");
+        assert_eq!(tcs[0].function.arguments, "{\"x\":1}");
+    }
+
+    #[test]
+    fn anthropic_stream_parses_text_and_tool_use() {
+        let data = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"lookup\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"q\\\":\\\"x\\\"}\"}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        );
+        let mut captured = String::new();
+        let msg = {
+            let mut sink = |s: &str| captured.push_str(s);
+            parse_anthropic_stream(data.as_bytes(), &mut sink).unwrap()
+        };
+        assert_eq!(captured, "hi");
+        assert_eq!(msg.content.as_deref(), Some("hi"));
+        let tcs = msg.tool_calls.expect("tool_calls");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "t1");
+        assert_eq!(tcs[0].function.name, "lookup");
+        assert_eq!(tcs[0].function.arguments, "{\"q\":\"x\"}");
     }
 }
