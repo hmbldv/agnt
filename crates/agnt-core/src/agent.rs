@@ -33,6 +33,7 @@ use crate::store_trait::{MessageStore, ToolLog};
 use crate::tool::Registry;
 use std::io::Write;
 use std::sync::Arc;
+use tracing::{debug, error, info_span, warn};
 
 /// Default cap on raw tool-result bytes before envelope framing.
 pub const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
@@ -224,6 +225,14 @@ impl<B: LlmBackend> Agent<B> {
     ///     and loop.
     #[allow(deprecated)]
     pub fn step(&mut self, user_input: &str) -> Result<String, String> {
+        let _span = info_span!(
+            "agnt.step",
+            session = %self.session,
+            input_len = user_input.len(),
+        )
+        .entered();
+        debug!(user_input_len = user_input.len(), "agent.step start");
+
         let ctx = StepContext {
             session: self.session.clone(),
             user_input: user_input.into(),
@@ -260,6 +269,13 @@ impl<B: LlmBackend> Agent<B> {
             let use_on_token = self.on_token.is_some();
             let use_legacy_stream = !use_on_token && self.stream;
 
+            let _backend_span = info_span!(
+                "agnt.backend.chat",
+                model = %self.backend.model(),
+                window_size = send.len(),
+            )
+            .entered();
+
             let resp = if use_on_token {
                 // Temporarily move the callback out so we can borrow the
                 // backend and self.messages at the same time.
@@ -270,6 +286,7 @@ impl<B: LlmBackend> Agent<B> {
                     .chat(send, &tools, Some(&mut sink))
                     .map_err(|e| {
                         let es = e.to_string();
+                        error!(error = %es, "backend chat error");
                         self.observer.on_step_error(&es);
                         es
                     });
@@ -285,6 +302,7 @@ impl<B: LlmBackend> Agent<B> {
                     .chat(send, &tools, Some(&mut sink))
                     .map_err(|e| {
                         let es = e.to_string();
+                        error!(error = %es, "backend chat error");
                         self.observer.on_step_error(&es);
                         es
                     })?;
@@ -295,10 +313,12 @@ impl<B: LlmBackend> Agent<B> {
                     .chat(send, &tools, None)
                     .map_err(|e| {
                         let es = e.to_string();
+                        error!(error = %es, "backend chat error");
                         self.observer.on_step_error(&es);
                         es
                     })?
             };
+            drop(_backend_span);
 
             // P1: no resp.clone(). Push, then reach back into
             // self.messages for the pushed entry by index.
@@ -355,6 +375,12 @@ impl<B: LlmBackend> Agent<B> {
                             let observer = observer.clone();
                             let call_clone = call.clone();
                             s.spawn(move || {
+                                let _tool_span = info_span!(
+                                    "agnt.tool",
+                                    name = %name,
+                                    id = %id,
+                                )
+                                .entered();
                                 observer.on_tool_start(&call_clone);
                                 let args: serde_json::Value =
                                     serde_json::from_str(&args_str)
@@ -362,8 +388,12 @@ impl<B: LlmBackend> Agent<B> {
                                 let t0 = std::time::Instant::now();
                                 let result = registry
                                     .dispatch(&name, args)
-                                    .unwrap_or_else(|e| format!("error: {}", e));
+                                    .unwrap_or_else(|e| {
+                                        warn!(tool = %name, error = %e, "tool dispatch failed");
+                                        format!("error: {}", e)
+                                    });
                                 let dur = t0.elapsed().as_micros() as u64;
+                                debug!(tool = %name, duration_us = dur, "tool completed");
                                 let tool_result = ToolResult {
                                     name: name.clone(),
                                     output: Ok(result.clone()),

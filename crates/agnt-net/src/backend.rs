@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Openai,
     Anthropic,
@@ -109,6 +109,15 @@ impl Backend {
         Ok(self)
     }
 
+    #[tracing::instrument(
+        skip(self, messages, tools, sink),
+        fields(
+            kind = ?self.kind,
+            model = %self.model,
+            message_count = messages.len(),
+            streaming = sink.is_some(),
+        )
+    )]
     pub fn chat(
         &self,
         messages: &[Message],

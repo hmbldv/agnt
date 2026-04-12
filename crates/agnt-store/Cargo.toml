@@ -21,3 +21,4 @@ path = "src/lib.rs"
 agnt-core = { version = "0.2", path = "../agnt-core" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }

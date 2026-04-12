@@ -1,6 +1,6 @@
 # agnt
 
-**A dense, sync-first Rust agent engine.** Multi-backend LLM inference with streaming, parallel tool dispatch, SQLite session persistence, and microsecond-level tool profiling — in under 1,500 lines of code with no async runtime required.
+**The smallest Rust agent runtime that's auditable as a single binary, structurally sandboxed against adversarial LLM output, and composable across async and sync callers without forcing a runtime choice on either.**
 
 [![Crates.io](https://img.shields.io/crates/v/agnt.svg)](https://crates.io/crates/agnt)
 [![Documentation](https://docs.rs/agnt/badge.svg)](https://docs.rs/agnt)
@@ -8,30 +8,44 @@
 
 ```toml
 [dependencies]
-agnt = "0.1"
+agnt = "0.2"
 ```
 
-## Repository layout
+## Repository layout (v0.2 — multi-crate workspace)
 
-This repo is a Cargo workspace with two crates:
+| Path | Crate | Purpose |
+|---|---|---|
+| `crates/agnt/` | `agnt` | Flagship meta-crate — what you `cargo add` |
+| `crates/agnt-core/` | `agnt-core` | Traits + message types + Agent loop. Zero I/O deps. WASM-ready. |
+| `crates/agnt-net/` | `agnt-net` | HTTP backend (Ollama / OpenAI / Anthropic) with streaming + retry |
+| `crates/agnt-store/` | `agnt-store` | SQLite message store (bundled, WAL mode, prepared-statement cache) |
+| `crates/agnt-tools/` | `agnt-tools` | Built-in tools with filesystem sandbox, SSRF guard, opt-in shell |
+| `src/` | `agnt-rs` | REPL binary example consumer |
 
-- **`agnt-core/`** — the `agnt` library crate ([README](agnt-core/README.md) · [crates.io](https://crates.io/crates/agnt) · [docs.rs](https://docs.rs/agnt))
-- **`src/`** — the `agnt-rs` binary, a REPL example consumer of the library
+All five library crates publish independently; `cargo add agnt` pulls the
+full stack via `default = ["net", "store", "tools"]`.
 
 ## Quick start
 
 ```rust
-use agnt::{Agent, Backend};
+use agnt::{AgentBuilder, Backend};
+use agnt::builtins::{ReadFile, Grep};
 
-let backend = Backend::ollama("gemma4:e4b");
-let mut agent = Agent::new(backend, "You are a helpful assistant.");
-agent.tools.register(Box::new(agnt::builtins::Grep));
+fn main() -> Result<(), String> {
+    let backend = Backend::ollama("gemma4:e4b");
 
-let reply = agent.step("Find TODOs in src/")?;
-println!("{}", reply);
+    let mut agent = AgentBuilder::new(backend)
+        .system("You are a helpful assistant.")
+        .tool(Box::new(ReadFile::new()))
+        .tool(Box::new(Grep::new()))
+        .build()?;
+
+    println!("{}", agent.step("Find TODOs in src/")?);
+    Ok(())
+}
 ```
 
-## Running the binary
+## Running the REPL binary
 
 ```bash
 ollama pull gemma4:e4b
@@ -41,9 +55,19 @@ cargo run --release
 > /stats
 ```
 
-The included `agnt-rs` binary is a 137-line REPL wrapper around `agnt` with CLI flags for session management, tool allowlisting, streaming toggles, and a `/stats` command that prints µs-level tool latency breakdowns from the SQLite log.
+The REPL is a thin wrapper over `agnt` with CLI flags for session
+management, tool allowlisting, and a `/stats` command that prints µs-level
+tool latency breakdowns from the SQLite log.
 
-See **[agnt-core/README.md](agnt-core/README.md)** for full library documentation, feature comparison against `rig-core` / `llm` / `langchain-rust`, benchmarks, and roadmap.
+## Documentation
+
+- **[Library README](crates/agnt/README.md)** — Full feature matrix, typed
+  tools, observer hooks, benchmarks, and comparison against rig-core,
+  llm, langchain-rust.
+- **[Threat model](THREAT_MODEL.md)** — What the v0.2 security model
+  defends against, what's partially mitigated, and what's out of scope.
+- **[Changelog](CHANGELOG.md)** — v0.1 → v0.2 migration notes, every
+  breaking change, and the full list of security and performance fixes.
 
 ## License
 

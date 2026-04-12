@@ -50,8 +50,8 @@
 
 // Core types and traits — always re-exported.
 pub use agnt_core::{
-    Agent, BackendError, FunctionCall, LlmBackend, Message, MessageStore, Observer, Registry,
-    StoreError, Tool, ToolCall, ToolLog, ToolResult,
+    Agent, AgentBuilder, BackendError, ErasedAdapter, FunctionCall, LlmBackend, Message,
+    MessageStore, Observer, Registry, StoreError, Tool, ToolCall, ToolLog, ToolResult, TypedTool,
 };
 
 /// Alias the agent loop module for explicit access.

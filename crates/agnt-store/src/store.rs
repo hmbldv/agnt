@@ -1,6 +1,7 @@
 use agnt_core::{Message, MessageStore, StoreError, ToolLog};
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
+use tracing::{debug, info};
 
 fn io_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Io(e.to_string())
@@ -25,11 +26,12 @@ impl Store {
 
         // WAL mode + relaxed fsync on the hot path. `journal_mode` is a
         // PRAGMA that returns the new mode as a row, so we use `query_row`.
-        let _mode: String = conn
+        let mode: String = conn
             .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "synchronous", &"NORMAL")
             .map_err(|e| e.to_string())?;
+        info!(path = %path, journal_mode = %mode, "agnt-store opened");
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -145,6 +147,7 @@ impl Store {
 
     /// Append many messages in a single transaction. Reduces fsync cost
     /// from 2+N per turn down to 1.
+    #[tracing::instrument(skip(self, messages), fields(session = %session, count = messages.len()))]
     pub fn append_many(&self, session: &str, messages: &[Message]) -> Result<(), String> {
         if messages.is_empty() {
             return Ok(());
@@ -196,7 +199,9 @@ impl Store {
         Ok(out)
     }
 
+    #[tracing::instrument(skip(self), fields(session = %session))]
     pub fn clear(&self, session: &str) -> Result<(), String> {
+        debug!("clearing session");
         let conn = self.lock()?;
         {
             let mut stmt = conn

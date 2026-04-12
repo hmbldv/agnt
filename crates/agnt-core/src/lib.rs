@@ -25,6 +25,7 @@
 
 pub mod agent;
 pub mod backend_trait;
+pub mod builder;
 pub mod message;
 pub mod observer;
 pub mod store_trait;
@@ -32,6 +33,7 @@ pub mod tool;
 
 pub use agent::Agent;
 pub use backend_trait::{BackendError, LlmBackend};
+pub use builder::AgentBuilder;
 pub use message::{FunctionCall, Message, ToolCall};
 pub use observer::{Observer, ToolResult};
 pub use store_trait::{MessageStore, StoreError, ToolLog};
