@@ -50,9 +50,11 @@
 
 // Core types and traits — always re-exported.
 pub use agnt_core::{
-    Agent, AgentBuilder, BackendError, ErasedAdapter, FunctionCall, LlmBackend, Message,
-    MessageStore, Observer, Registry, StoreError, Tool, ToolCall, ToolLog, ToolResult, TypedTool,
+    Agent, AgentBuilder, BackendError, Disposition, ErasedAdapter, FunctionCall, LlmBackend,
+    Message, MessageStore, Observer, Registry, StoreError, Tool, ToolCall, ToolLog, ToolResult,
+    TypedTool,
 };
+pub use agnt_core::agent::ToolQuota;
 
 /// Alias the agent loop module for explicit access.
 pub mod agent {
@@ -91,4 +93,16 @@ pub mod store {
 #[cfg(feature = "tools")]
 pub mod builtins {
     pub use agnt_tools::builtins::*;
+}
+
+// v0.3: #[tool] proc-macro. Feature-gated so crates that want a minimal
+// agnt-core footprint can skip the proc-macro compile cost.
+#[cfg(feature = "macros")]
+pub use agnt_macros::tool;
+
+// v0.3: MCP stdio client + Tool bridge. Feature-gated because the average
+// user doesn't need it and it pulls in child-process plumbing.
+#[cfg(feature = "mcp")]
+pub mod mcp {
+    pub use agnt_mcp::*;
 }

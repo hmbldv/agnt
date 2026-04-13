@@ -1,0 +1,49 @@
+[package]
+name = "agnt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+agnt-core  = { path = "../crates/agnt-core" }
+agnt-tools = { path = "../crates/agnt-tools" }
+
+# Prevent this crate from being absorbed into the parent workspace.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_filesystem_root_resolve"
+path = "fuzz_targets/fuzz_filesystem_root_resolve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fetch_ssrf"
+path = "fuzz_targets/fuzz_fetch_ssrf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_glob_pattern"
+path = "fuzz_targets/fuzz_glob_pattern.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tool_call_dispatch"
+path = "fuzz_targets/fuzz_tool_call_dispatch.rs"
+test = false
+doc = false
+bench = false

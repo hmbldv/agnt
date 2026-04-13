@@ -1,0 +1,29 @@
+[package]
+name = "agnt-macros"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["doop"]
+description = "Proc-macros for the agnt agent runtime — #[tool] attribute that generates TypedTool impls from function signatures."
+repository = "https://github.com/hmbldv/agnt"
+homepage = "https://github.com/hmbldv/agnt"
+documentation = "https://docs.rs/agnt-macros"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["agent", "llm", "macro", "proc-macro", "tool"]
+categories = ["api-bindings", "development-tools::procedural-macro-helpers"]
+
+[lib]
+name = "agnt_macros"
+path = "src/lib.rs"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+agnt-core = { path = "../agnt-core", version = "0.3.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,6 +1,6 @@
 [package]
 name = "agnt-store"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 authors = ["doop"]
@@ -18,7 +18,7 @@ name = "agnt_store"
 path = "src/lib.rs"
 
 [dependencies]
-agnt-core = { version = "0.2", path = "../agnt-core" }
+agnt-core = { version = "0.3", path = "../agnt-core" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }

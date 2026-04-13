@@ -4,6 +4,73 @@ All notable changes to `agnt` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-12
+
+Ergonomics + extensibility release. No new Critical-severity findings; v0.3
+is additive over v0.2 and existing code keeps compiling. Two new crates join
+the workspace, and the agent loop gains per-tool quotas plus an observer
+veto hook so embedders can enforce policy without forking the dispatch path.
+
+### ✨ New
+
+- **`agnt-macros` crate — `#[tool]` attribute macro.** Turns an ordinary
+  `fn` into a `TypedTool` impl, lifting the first-line doc comment into the
+  tool description and generating a PascalCase wrapper struct. Behind the
+  `macros` feature on the flagship crate (on by default). Schema generation
+  is a placeholder object in v0.3; schemars-derived JSON Schema is planned
+  for v0.4.
+- **`agnt-mcp` crate — MCP stdio client.** Spawns an MCP server subprocess,
+  runs the `2024-11-05` protocol handshake, and bridges each remote tool
+  into the existing `agnt_core::Tool` trait via `McpTool`. No async
+  runtime; the reader is a dedicated std thread draining stdout into an
+  `mpsc` channel with a 30-second request timeout. Behind the `mcp`
+  feature (off by default — `cargo add agnt --features mcp`).
+- **`ToolQuota` — per-tool rate limits inside a single `step()`.** Cap
+  `max_calls`, `max_duration_us`, and `max_result_bytes` per tool name.
+  Quota violations become refused tool messages that the model sees on
+  the next turn, so the agent can notice and adapt.
+- **`Observer::should_dispatch(&ToolCall) -> Disposition`.** New default
+  method on the `Observer` trait (`Disposition::Allow` / `Refused(msg)`)
+  that lets policy layers veto a tool call before it runs. Refusals are
+  surfaced as tool results so the model stays in the loop.
+- **`bwrap-shell` feature — Linux bubblewrap sandbox for `Shell`.**
+  Stacks on top of the v0.2 argv allowlist: when enabled, allowed commands
+  execute inside a `bwrap --unshare-all --die-with-parent` namespace with
+  a tmpfs `/tmp`, a read-only `/usr` + `/bin`, and cwd bound at the same
+  path. Opt-in via `agnt-tools/bwrap-shell` or the flagship
+  `tools-bwrap-shell` feature. Non-Linux builds return a clear error from
+  the `new_bwrap` constructor.
+- **`fuzz/` workspace — 4 libfuzzer targets.** Covers `FilesystemRoot`
+  resolution, Fetch SSRF guard, glob pattern parsing, and tool-call
+  dispatch. Isolated via a nested `[workspace]` table so the main crates
+  stay on stable Rust. Stream parsers will be fuzzed in v0.4 once the
+  targets gain a non-private entry point.
+- **Release-grade criterion benches** with real numbers captured in
+  `benches/README.md`.
+
+### 🧰 Flagship features
+
+- New: `macros` (default on), `mcp`, `tools-bwrap-shell`.
+- Unchanged: `net`, `store`, `tools`, `tools-shell`.
+
+### 🧪 Tests
+
+- +12 unit tests across the new crates and the quota / observer veto paths.
+- Workspace test count: 77 passing with default features, 83 with
+  `shell bwrap-shell` enabled. Zero `#[ignore]`-by-default tests outside
+  of the bwrap integration test that requires `bwrap` on `$PATH`.
+- One flaky MCP stdio test stabilized by aligning the mock-server script
+  with the post-handshake `notifications/initialized` notification.
+
+### 🛠 Internal
+
+- Workspace version bumped to `0.3.0`; all path-dep version constraints
+  bumped in lockstep.
+- `Agent::step` now runs a sequential pre-dispatch decision pass
+  (observer veto + quota check) before the parallel `thread::scope`
+  dispatch block, so quota counters remain coherent under concurrent
+  tool calls within one turn.
+
 ## [0.2.0] — 2026-04-12
 
 A hardening + restructuring release. v0.1.0 has been yanked from crates.io;

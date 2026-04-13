@@ -35,6 +35,6 @@ pub use agent::Agent;
 pub use backend_trait::{BackendError, LlmBackend};
 pub use builder::AgentBuilder;
 pub use message::{FunctionCall, Message, ToolCall};
-pub use observer::{Observer, ToolResult};
+pub use observer::{Disposition, Observer, StepContext, ToolResult};
 pub use store_trait::{MessageStore, StoreError, ToolLog};
 pub use tool::{ErasedAdapter, Registry, Tool, TypedTool};

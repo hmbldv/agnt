@@ -8,10 +8,10 @@
 
 ```toml
 [dependencies]
-agnt = "0.2"
+agnt = "0.3"
 ```
 
-## Repository layout (v0.2 — multi-crate workspace)
+## Repository layout (v0.3 — multi-crate workspace)
 
 | Path | Crate | Purpose |
 |---|---|---|
@@ -19,11 +19,15 @@ agnt = "0.2"
 | `crates/agnt-core/` | `agnt-core` | Traits + message types + Agent loop. Zero I/O deps. WASM-ready. |
 | `crates/agnt-net/` | `agnt-net` | HTTP backend (Ollama / OpenAI / Anthropic) with streaming + retry |
 | `crates/agnt-store/` | `agnt-store` | SQLite message store (bundled, WAL mode, prepared-statement cache) |
-| `crates/agnt-tools/` | `agnt-tools` | Built-in tools with filesystem sandbox, SSRF guard, opt-in shell |
+| `crates/agnt-tools/` | `agnt-tools` | Built-in tools with filesystem sandbox, SSRF guard, opt-in shell (+ bubblewrap on Linux) |
+| `crates/agnt-macros/` | `agnt-macros` | `#[tool]` attribute macro — turn a `fn` into a `TypedTool` with zero boilerplate |
+| `crates/agnt-mcp/` | `agnt-mcp` | MCP stdio client — bridges remote MCP tools into `agnt_core::Tool` |
+| `fuzz/` | — | libfuzzer targets for sandbox, SSRF, glob, dispatch |
 | `src/` | `agnt-rs` | REPL binary example consumer |
 
-All five library crates publish independently; `cargo add agnt` pulls the
-full stack via `default = ["net", "store", "tools"]`.
+All seven library crates publish independently; `cargo add agnt` pulls the
+default stack via `default = ["net", "store", "tools", "macros"]`. Opt in
+to `mcp` and `tools-bwrap-shell` as needed.
 
 ## Quick start
 

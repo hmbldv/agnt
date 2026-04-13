@@ -4,13 +4,15 @@ members = [
     "crates/agnt-net",
     "crates/agnt-store",
     "crates/agnt-tools",
+    "crates/agnt-macros",
+    "crates/agnt-mcp",
     "crates/agnt",
     ".",
 ]
 
 [package]
 name = "agnt-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "REPL binary example consumer of the agnt library"
 

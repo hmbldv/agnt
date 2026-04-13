@@ -1,6 +1,6 @@
 [package]
 name = "agnt-tools"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 authors = ["doop"]
@@ -22,9 +22,12 @@ default = []
 # Shell tool is opt-in — requires explicit sandbox configuration.
 # CVE-class capability: read the v0.2 threat model before enabling.
 shell = []
+# v0.3 C1: bubblewrap sandbox for the Shell tool. Linux only.
+# Defense in depth on top of the argv allowlist.
+bwrap-shell = ["shell"]
 
 [dependencies]
-agnt-core = { version = "0.2", path = "../agnt-core" }
+agnt-core = { version = "0.3", path = "../agnt-core" }
 ureq = { version = "2.12", default-features = false, features = ["json", "native-tls", "gzip"] }
 native-tls = "0.2"
 serde_json = "1"

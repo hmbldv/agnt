@@ -1,6 +1,6 @@
 [package]
 name = "agnt-net"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 authors = ["doop"]
@@ -18,7 +18,7 @@ name = "agnt_net"
 path = "src/lib.rs"
 
 [dependencies]
-agnt-core = { version = "0.2", path = "../agnt-core" }
+agnt-core = { version = "0.3", path = "../agnt-core" }
 ureq = { version = "2.12", default-features = false, features = ["json", "native-tls", "gzip"] }
 native-tls = "0.2"
 serde = { version = "1", features = ["derive"] }

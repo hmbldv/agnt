@@ -33,6 +33,23 @@ pub struct StepContext {
     pub user_input: String,
 }
 
+/// Disposition returned by [`Observer::should_dispatch`] — whether a tool
+/// call should proceed, be refused, or be intercepted.
+///
+/// v0.3 C2. Added as the canonical extension point for trust tier enforcement,
+/// human-in-the-loop approval, and policy gating. The agent treats
+/// [`Disposition::Refused`] as a synthetic tool result (fed back to the model
+/// as an error) so the loop continues instead of aborting.
+#[derive(Debug, Clone)]
+pub enum Disposition {
+    /// The tool call may proceed normally.
+    Allow,
+    /// The tool call is refused. The provided message becomes the tool
+    /// result passed back to the model ("wrapped" in the standard
+    /// `<tool_output>` envelope by the agent).
+    Refused(String),
+}
+
 /// Lifecycle observer. Every method has a default no-op implementation so
 /// implementors override only the hooks they care about.
 pub trait Observer: Send + Sync {
@@ -50,6 +67,26 @@ pub trait Observer: Send + Sync {
 
     /// Called if the step loop errors out before producing a final message.
     fn on_step_error(&self, _error: &str) {}
+
+    /// v0.3 C2 — policy gate fired BEFORE every tool dispatch.
+    ///
+    /// Returning [`Disposition::Allow`] (the default) lets the call proceed.
+    /// Returning [`Disposition::Refused`] causes the agent to skip the actual
+    /// tool call and return the provided message to the model as a synthetic
+    /// tool result. The loop continues — the model may choose to call a
+    /// different tool, retry with different arguments, or stop.
+    ///
+    /// This is the canonical extension point for:
+    /// - Trust tier enforcement (deny by policy)
+    /// - Human-in-the-loop approval (block until a human clicks "allow")
+    /// - Quota accounting layered on top of the built-in `Agent::tool_quotas`
+    /// - Content filtering on tool arguments
+    ///
+    /// Default impl always allows. Existing `Observer` implementations do
+    /// not need to change.
+    fn should_dispatch(&self, _call: &ToolCall) -> Disposition {
+        Disposition::Allow
+    }
 }
 
 /// A no-op observer used as the default when the agent is constructed

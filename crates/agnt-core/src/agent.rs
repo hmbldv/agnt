@@ -28,15 +28,59 @@
 
 use crate::backend_trait::LlmBackend;
 use crate::message::Message;
-use crate::observer::{NoOpObserver, Observer, StepContext, ToolResult};
+use crate::observer::{Disposition, NoOpObserver, Observer, StepContext, ToolResult};
 use crate::store_trait::{MessageStore, ToolLog};
 use crate::tool::Registry;
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 use tracing::{debug, error, info_span, warn};
 
 /// Default cap on raw tool-result bytes before envelope framing.
 pub const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
+
+/// Per-tool quota (v0.3 M3).
+///
+/// Limits imposed on a specific tool for the duration of a single
+/// [`Agent::step`] invocation. Counters reset at the start of each step.
+/// All fields are optional — unset means unlimited.
+///
+/// # Example
+///
+/// ```ignore
+/// use agnt_core::agent::ToolQuota;
+///
+/// let mut agent = AgentBuilder::new(backend).build()?;
+/// agent.tool_quotas.insert(
+///     "shell".to_string(),
+///     ToolQuota {
+///         max_calls: Some(3),
+///         max_duration_us: Some(5_000_000), // 5s total shell time
+///         max_result_bytes: Some(16 * 1024),
+///     },
+/// );
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ToolQuota {
+    /// Maximum number of times this tool may be called during one `step`.
+    /// `None` means unlimited.
+    pub max_calls: Option<u32>,
+    /// Total wall-clock time across all calls to this tool during one `step`,
+    /// in microseconds. `None` means unlimited.
+    pub max_duration_us: Option<u64>,
+    /// Maximum raw bytes of output per individual call. Enforced AFTER the
+    /// tool runs but BEFORE envelope framing. `None` means use the
+    /// agent-wide [`Agent::max_tool_result_bytes`] default.
+    pub max_result_bytes: Option<usize>,
+}
+
+/// Runtime counters for per-tool quota enforcement. Lives on the stack
+/// during a single `step` invocation.
+#[derive(Default)]
+struct QuotaUsage {
+    calls: u32,
+    duration_us: u64,
+}
 
 /// The agent loop.
 pub struct Agent<B: LlmBackend> {
@@ -55,6 +99,9 @@ pub struct Agent<B: LlmBackend> {
     /// Maximum raw bytes per tool result, truncated before `<tool_output>`
     /// framing. Defaults to [`DEFAULT_MAX_TOOL_RESULT_BYTES`] (64KB).
     pub max_tool_result_bytes: usize,
+    /// Per-tool quotas (v0.3 M3). Lookup key is `Tool::name()`. Unset tools
+    /// have no quota (unlimited).
+    pub tool_quotas: HashMap<String, ToolQuota>,
     /// Optional persistence layer.
     pub store: Option<Arc<dyn MessageStore>>,
     /// Session identifier for the store (defaults to "default").
@@ -101,6 +148,7 @@ impl<B: LlmBackend> Agent<B> {
             max_steps: 10,
             max_window: 40,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
+            tool_quotas: HashMap::new(),
             store: None,
             session: "default".into(),
             observer: Arc::new(NoOpObserver),
@@ -251,6 +299,10 @@ impl<B: LlmBackend> Agent<B> {
 
         let tools = self.tools.as_openai_tools();
 
+        // v0.3 M3: per-tool quota state, accumulated across all turns of
+        // this step() call. Resets only on return from step().
+        let mut quota_usage: HashMap<String, QuotaUsage> = HashMap::new();
+
         for _ in 0..self.max_steps {
             // P1: avoid full-window clone. When history fits, borrow
             // self.messages directly. When truncation is required, build
@@ -359,16 +411,82 @@ impl<B: LlmBackend> Agent<B> {
                 .expect("has_calls checked above")
                 .clone();
 
+            // v0.3 C2 + M3: sequentially evaluate each call's disposition
+            // (observer policy check) and quota state BEFORE spawning any
+            // scoped thread. Calls that are refused or over-quota get a
+            // synthetic result and are NOT dispatched.
+            //
+            // This preserves the parallel dispatch for allowed calls while
+            // keeping quota accounting deterministic.
+            enum CallDecision {
+                /// Allowed — will be dispatched in the scoped thread pool.
+                Allow,
+                /// Refused — synthetic result, skip actual dispatch.
+                Refused(String),
+            }
+            let observer_clone = self.observer.clone();
+            let decisions: Vec<CallDecision> = calls
+                .iter()
+                .map(|call| {
+                    // C2: observer policy gate
+                    if let Disposition::Refused(msg) = observer_clone.should_dispatch(call) {
+                        warn!(tool = %call.function.name, reason = %msg, "observer refused dispatch");
+                        return CallDecision::Refused(format!(
+                            "refused by observer: {}",
+                            msg
+                        ));
+                    }
+                    // M3: per-tool quota check
+                    if let Some(quota) = self.tool_quotas.get(&call.function.name) {
+                        let usage = quota_usage
+                            .entry(call.function.name.clone())
+                            .or_default();
+                        if let Some(max) = quota.max_calls {
+                            if usage.calls >= max {
+                                warn!(
+                                    tool = %call.function.name,
+                                    max = max,
+                                    "tool call quota exceeded"
+                                );
+                                return CallDecision::Refused(format!(
+                                    "quota exceeded: {} reached max {} calls this step",
+                                    call.function.name, max
+                                ));
+                            }
+                        }
+                        if let Some(max_us) = quota.max_duration_us {
+                            if usage.duration_us >= max_us {
+                                warn!(
+                                    tool = %call.function.name,
+                                    max_us = max_us,
+                                    "tool duration quota exceeded"
+                                );
+                                return CallDecision::Refused(format!(
+                                    "quota exceeded: {} reached max {}µs wall time this step",
+                                    call.function.name, max_us
+                                ));
+                            }
+                        }
+                        // Reserve the call slot before dispatching.
+                        usage.calls += 1;
+                    }
+                    CallDecision::Allow
+                })
+                .collect();
+
             let registry = &self.tools;
             let observer = self.observer.clone();
             // P1 + S5: run dispatch in scoped threads. If a worker panics
             // its join error is converted to an error string and surfaced
-            // as the tool result, so the loop continues.
+            // as the tool result, so the loop continues. Refused calls
+            // (C2/M3) skip the actual dispatch but still fire on_tool_start
+            // / on_tool_end so observers see the full lifecycle.
             let results: Vec<(String, String, String, String, u64)> =
                 std::thread::scope(|s| {
                     let handles: Vec<_> = calls
                         .iter()
-                        .map(|call| {
+                        .zip(decisions.into_iter())
+                        .map(|(call, decision)| {
                             let name = call.function.name.clone();
                             let id = call.id.clone();
                             let args_str = call.function.arguments.clone();
@@ -382,18 +500,30 @@ impl<B: LlmBackend> Agent<B> {
                                 )
                                 .entered();
                                 observer.on_tool_start(&call_clone);
-                                let args: serde_json::Value =
-                                    serde_json::from_str(&args_str)
-                                        .unwrap_or(serde_json::Value::Null);
-                                let t0 = std::time::Instant::now();
-                                let result = registry
-                                    .dispatch(&name, args)
-                                    .unwrap_or_else(|e| {
-                                        warn!(tool = %name, error = %e, "tool dispatch failed");
-                                        format!("error: {}", e)
-                                    });
-                                let dur = t0.elapsed().as_micros() as u64;
-                                debug!(tool = %name, duration_us = dur, "tool completed");
+
+                                let (result, dur) = match decision {
+                                    CallDecision::Refused(msg) => (msg, 0u64),
+                                    CallDecision::Allow => {
+                                        let args: serde_json::Value =
+                                            serde_json::from_str(&args_str)
+                                                .unwrap_or(serde_json::Value::Null);
+                                        let t0 = std::time::Instant::now();
+                                        let result = registry
+                                            .dispatch(&name, args)
+                                            .unwrap_or_else(|e| {
+                                                warn!(tool = %name, error = %e, "tool dispatch failed");
+                                                format!("error: {}", e)
+                                            });
+                                        let dur = t0.elapsed().as_micros() as u64;
+                                        debug!(
+                                            tool = %name,
+                                            duration_us = dur,
+                                            "tool completed"
+                                        );
+                                        (result, dur)
+                                    }
+                                };
+
                                 let tool_result = ToolResult {
                                     name: name.clone(),
                                     output: Ok(result.clone()),
@@ -421,6 +551,15 @@ impl<B: LlmBackend> Agent<B> {
                         .collect()
                 });
 
+            // M3: accumulate post-dispatch durations into the quota usage
+            // counters so the next turn's `max_duration_us` check is correct.
+            for (_id, name, _args, _result, dur) in &results {
+                if self.tool_quotas.contains_key(name) {
+                    let u = quota_usage.entry(name.clone()).or_default();
+                    u.duration_us = u.duration_us.saturating_add(*dur);
+                }
+            }
+
             for (id, name, args_str, result, dur_us) in results {
                 if use_legacy_stream {
                     println!("[tool: {} ({:.2}ms)]", name, dur_us as f64 / 1000.0);
@@ -436,6 +575,22 @@ impl<B: LlmBackend> Agent<B> {
                         eprintln!("log_tool: {}", e);
                     }
                 }
+                // M3: per-tool `max_result_bytes` is a tighter cap than the
+                // global `max_tool_result_bytes`. Apply it first if set.
+                let result = match self
+                    .tool_quotas
+                    .get(&name)
+                    .and_then(|q| q.max_result_bytes)
+                {
+                    Some(cap) if result.len() > cap => {
+                        let mut end = cap;
+                        while end > 0 && !result.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        result[..end].to_string()
+                    }
+                    _ => result,
+                };
                 // S4: frame + byte-cap before the result becomes a message.
                 let framed = self.frame_tool_output(&name, &id, &result);
                 let msg = Message {
@@ -636,5 +791,157 @@ mod tests {
         let framed = a.frame_tool_output("na\"me", "id&1", "x");
         assert!(framed.contains("name=\"na&quot;me\""));
         assert!(framed.contains("id=\"id&amp;1\""));
+    }
+
+    // ---- M3 quotas + C2 observer dispatch hook -----------------------------------
+
+    use crate::tool::Tool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// Scripted backend: yields a canned sequence of messages, one per chat call.
+    /// Terminates the loop when the script is exhausted by returning a plain
+    /// assistant message.
+    struct ScriptedBackend {
+        script: Mutex<std::collections::VecDeque<Message>>,
+    }
+    impl ScriptedBackend {
+        fn new(script: Vec<Message>) -> Self {
+            Self { script: Mutex::new(script.into()) }
+        }
+    }
+    impl LlmBackend for ScriptedBackend {
+        fn model(&self) -> &str { "scripted" }
+        fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &Value,
+            _on_token: Option<&mut dyn FnMut(&str)>,
+        ) -> Result<Message, BackendError> {
+            let m = self.script.lock().unwrap().pop_front().unwrap_or_else(|| Message {
+                role: "assistant".into(),
+                content: Some("done".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+            Ok(m)
+        }
+    }
+
+    /// Tool that counts invocations and returns a fixed payload.
+    struct CountingTool {
+        hits: Arc<AtomicUsize>,
+        payload: String,
+    }
+    impl Tool for CountingTool {
+        fn name(&self) -> &str { "counter" }
+        fn description(&self) -> &str { "test counter" }
+        fn schema(&self) -> Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+        fn call(&self, _args: Value) -> Result<String, String> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(self.payload.clone())
+        }
+    }
+
+    fn tool_call(id: &str, name: &str) -> Message {
+        Message {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: id.into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: name.into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn quota_max_calls_refuses_after_limit_within_single_step() {
+        // Script: two turns that each call the counter, then a final assistant
+        // text. The quota is 1 call — second dispatch should be refused.
+        let script = vec![
+            tool_call("c1", "counter"),
+            tool_call("c2", "counter"),
+        ];
+        let hits = Arc::new(AtomicUsize::new(0));
+        #[allow(deprecated)]
+        let mut a = Agent::new(ScriptedBackend::new(script), "sys");
+        a.tools.register(Box::new(CountingTool {
+            hits: hits.clone(),
+            payload: "ok".into(),
+        }));
+        a.tool_quotas.insert(
+            "counter".into(),
+            ToolQuota { max_calls: Some(1), ..Default::default() },
+        );
+        let out = a.step("go").unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "tool must run exactly once");
+        assert_eq!(out, "done");
+        // Refusal message should appear in the transcript.
+        let refused = a.messages.iter().any(|m| {
+            m.role == "tool"
+                && m.content.as_deref().map(|c| c.contains("quota exceeded")).unwrap_or(false)
+        });
+        assert!(refused, "second call must produce a quota-refused tool message");
+    }
+
+    #[test]
+    fn quota_max_result_bytes_truncates_before_framing() {
+        let script = vec![tool_call("c1", "counter")];
+        let hits = Arc::new(AtomicUsize::new(0));
+        #[allow(deprecated)]
+        let mut a = Agent::new(ScriptedBackend::new(script), "sys");
+        a.tools.register(Box::new(CountingTool {
+            hits,
+            payload: "0123456789ABCDEF".into(),
+        }));
+        a.tool_quotas.insert(
+            "counter".into(),
+            ToolQuota { max_result_bytes: Some(4), ..Default::default() },
+        );
+        a.step("go").unwrap();
+        let tool_msg = a
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("tool message present");
+        let body = tool_msg.content.as_deref().unwrap();
+        assert!(body.contains("0123"), "kept prefix");
+        assert!(!body.contains("456789"), "truncated tail");
+    }
+
+    #[test]
+    fn observer_refuses_dispatch_and_tool_never_runs() {
+        struct DenyObserver;
+        impl Observer for DenyObserver {
+            fn should_dispatch(&self, _call: &ToolCall) -> Disposition {
+                Disposition::Refused("policy".into())
+            }
+        }
+
+        let script = vec![tool_call("c1", "counter")];
+        let hits = Arc::new(AtomicUsize::new(0));
+        #[allow(deprecated)]
+        let mut a = Agent::new(ScriptedBackend::new(script), "sys");
+        a.observer = Arc::new(DenyObserver);
+        a.tools.register(Box::new(CountingTool {
+            hits: hits.clone(),
+            payload: "should not run".into(),
+        }));
+        a.step("go").unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "observer must block dispatch");
+        let refused = a.messages.iter().any(|m| {
+            m.role == "tool"
+                && m.content.as_deref().map(|c| c.contains("refused by observer")).unwrap_or(false)
+        });
+        assert!(refused);
     }
 }

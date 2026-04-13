@@ -367,6 +367,31 @@ impl Tool for ListDir {
 pub struct Shell {
     allowed_argv0: Vec<String>,
     cwd: PathBuf,
+    /// v0.3 C1: optional bubblewrap configuration. When set, the call
+    /// wraps the spawned command in `bwrap` with a read-only rootfs and a
+    /// scoped bind mount of `cwd`. Linux only.
+    #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+    bwrap: Option<BwrapConfig>,
+}
+
+/// Bubblewrap configuration for the Shell tool (v0.3 C1).
+///
+/// Wraps the allowed command in `bwrap` with:
+/// - `--ro-bind /usr /usr`, `--ro-bind /bin /bin`, `--ro-bind /lib /lib`,
+///   `--ro-bind /lib64 /lib64`, `--ro-bind /etc /etc` (when present)
+/// - `--bind <cwd> <cwd>` (read-write bind of the sandboxed working dir)
+/// - `--tmpfs /tmp`, `--proc /proc`, `--dev /dev`
+/// - `--unshare-all` optionally modified by `share_net`
+/// - `--die-with-parent`
+/// - `--chdir <cwd>`
+#[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+#[derive(Debug, Clone)]
+pub struct BwrapConfig {
+    /// Whether to share the host's network namespace with the sandboxed
+    /// process. Set to `false` to deny network access entirely — at which
+    /// point every network-reaching command (`curl`, `git fetch`, etc.)
+    /// will fail inside the sandbox.
+    pub share_net: bool,
 }
 
 #[cfg(feature = "shell")]
@@ -385,7 +410,96 @@ impl Shell {
     /// CVE-class warning from the struct-level docs. Do not call it without
     /// OS-level isolation in place.
     pub fn new_sandboxed(allowed_argv0: Vec<String>, cwd: PathBuf) -> Self {
-        Self { allowed_argv0, cwd }
+        Self {
+            allowed_argv0,
+            cwd,
+            #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+            bwrap: None,
+        }
+    }
+
+    /// v0.3 C1: construct a Shell wrapped in bubblewrap for OS-level
+    /// defense-in-depth on top of the argv allowlist.
+    ///
+    /// Returns an error if `bwrap` is not available on the host PATH.
+    /// Only available when the `bwrap-shell` feature is enabled AND the
+    /// target is Linux — `bwrap` is a Linux-only tool.
+    ///
+    /// The sandbox bind-mounts `cwd` read-write; everything else under
+    /// `/usr`, `/bin`, `/lib`, `/lib64`, `/etc` is read-only. `/tmp` is a
+    /// tmpfs. No `/home`, no `/var`, no `/root` — set `cwd` to a
+    /// scratch directory and bind-mount additional paths manually by
+    /// extending [`BwrapConfig`] in your fork if you need more.
+    ///
+    /// This is CVE-class and must be paired with the v0.2 argv allowlist.
+    /// The sandbox is defense in depth, NOT a primary boundary.
+    #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+    pub fn new_bwrap(
+        allowed_argv0: Vec<String>,
+        cwd: PathBuf,
+        share_net: bool,
+    ) -> Result<Self, String> {
+        // Probe for bwrap on PATH.
+        let probe = std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .map_err(|e| format!("bwrap not available: {}", e))?;
+        if !probe.status.success() {
+            return Err(format!(
+                "bwrap --version exited {}",
+                probe.status.code().unwrap_or(-1)
+            ));
+        }
+        Ok(Self {
+            allowed_argv0,
+            cwd,
+            bwrap: Some(BwrapConfig { share_net }),
+        })
+    }
+
+    /// Non-Linux stub for `new_bwrap` — compile-error at call time via a
+    /// clear message rather than hiding the method entirely. Only compiled
+    /// when the `bwrap-shell` feature is enabled on a non-Linux target.
+    #[cfg(all(feature = "bwrap-shell", not(target_os = "linux")))]
+    pub fn new_bwrap(
+        _allowed_argv0: Vec<String>,
+        _cwd: PathBuf,
+        _share_net: bool,
+    ) -> Result<Self, String> {
+        Err("bwrap sandbox is Linux-only".into())
+    }
+
+    /// Build the bwrap argv vector that wraps `argv` with this shell's
+    /// bubblewrap config. Pure function, no I/O — used by both `call()`
+    /// and the unit tests.
+    #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+    fn build_bwrap_argv(
+        cfg: &BwrapConfig,
+        cwd: &std::path::Path,
+        argv: &[String],
+    ) -> Vec<String> {
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let mut out: Vec<String> = vec![
+            "--ro-bind".into(), "/usr".into(), "/usr".into(),
+            "--ro-bind".into(), "/bin".into(), "/bin".into(),
+            "--ro-bind-try".into(), "/lib".into(), "/lib".into(),
+            "--ro-bind-try".into(), "/lib64".into(), "/lib64".into(),
+            "--ro-bind-try".into(), "/etc".into(), "/etc".into(),
+            "--bind".into(), cwd_str.clone(), cwd_str.clone(),
+            "--tmpfs".into(), "/tmp".into(),
+            "--proc".into(), "/proc".into(),
+            "--dev".into(), "/dev".into(),
+            "--unshare-all".into(),
+        ];
+        if cfg.share_net {
+            out.push("--share-net".into());
+        }
+        out.push("--die-with-parent".into());
+        out.push("--chdir".into());
+        out.push(cwd_str);
+        out.push("--".into());
+        out.extend(argv.iter().cloned());
+        out
     }
 }
 
@@ -431,6 +545,24 @@ impl Tool for Shell {
             ));
         }
 
+        // v0.3 C1: when bwrap is configured, wrap the command. Otherwise
+        // spawn directly with the argv allowlist constraint only.
+        #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+        let out = if let Some(cfg) = &self.bwrap {
+            let bwrap_argv = Self::build_bwrap_argv(cfg, &self.cwd, &argv);
+            std::process::Command::new("bwrap")
+                .args(&bwrap_argv)
+                .output()
+                .map_err(|e| format!("bwrap spawn: {}", e))?
+        } else {
+            std::process::Command::new(argv0)
+                .args(&argv[1..])
+                .current_dir(&self.cwd)
+                .output()
+                .map_err(|e| format!("spawn: {}", e))?
+        };
+
+        #[cfg(not(all(feature = "bwrap-shell", target_os = "linux")))]
         let out = std::process::Command::new(argv0)
             .args(&argv[1..])
             .current_dir(&self.cwd)
@@ -989,5 +1121,51 @@ mod tests {
         let s = Shell::new_sandboxed(vec!["echo".into()], std::env::temp_dir());
         let out = s.call(json!({"cmd":"echo hello"})).unwrap();
         assert!(out.contains("hello"));
+    }
+
+    // ---- C1: bubblewrap sandbox ---------------------------------------------------------
+
+    #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+    #[test]
+    fn bwrap_argv_contains_core_ro_binds_and_unshare() {
+        let cfg = BwrapConfig { share_net: false };
+        let cwd = PathBuf::from("/tmp/workdir-xyz");
+        let argv = vec!["echo".to_string(), "hi".to_string()];
+        let out = Shell::build_bwrap_argv(&cfg, &cwd, &argv);
+        // Core read-only system binds
+        assert!(out.windows(3).any(|w| w == ["--ro-bind", "/usr", "/usr"]));
+        assert!(out.windows(3).any(|w| w == ["--ro-bind", "/bin", "/bin"]));
+        // Isolation
+        assert!(out.iter().any(|s| s == "--unshare-all"));
+        assert!(out.iter().any(|s| s == "--die-with-parent"));
+        assert!(out.iter().any(|s| s == "--tmpfs"));
+        // cwd gets bound and chdir'd
+        assert!(out.windows(3).any(|w| w[0] == "--bind" && w[1] == "/tmp/workdir-xyz"));
+        let chdir_pos = out.iter().position(|s| s == "--chdir").expect("chdir");
+        assert_eq!(out[chdir_pos + 1], "/tmp/workdir-xyz");
+        // `--` separator then the wrapped argv at the tail
+        let sep = out.iter().rposition(|s| s == "--").expect("-- sep");
+        assert_eq!(&out[sep + 1..], &["echo".to_string(), "hi".to_string()][..]);
+    }
+
+    #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+    #[test]
+    fn bwrap_share_net_flag_toggles() {
+        let cwd = PathBuf::from("/tmp/nw");
+        let argv = vec!["echo".to_string()];
+        let off = Shell::build_bwrap_argv(&BwrapConfig { share_net: false }, &cwd, &argv);
+        assert!(!off.iter().any(|s| s == "--share-net"));
+        let on = Shell::build_bwrap_argv(&BwrapConfig { share_net: true }, &cwd, &argv);
+        assert!(on.iter().any(|s| s == "--share-net"));
+    }
+
+    #[cfg(all(feature = "bwrap-shell", target_os = "linux"))]
+    #[test]
+    #[ignore = "requires bwrap installed locally"]
+    fn bwrap_echo_runs_under_sandbox() {
+        let s = Shell::new_bwrap(vec!["echo".into()], std::env::temp_dir(), false)
+            .expect("bwrap must be installed to run this test");
+        let out = s.call(json!({"cmd":"echo sandboxed"})).unwrap();
+        assert!(out.contains("sandboxed"));
     }
 }

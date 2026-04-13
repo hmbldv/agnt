@@ -1,0 +1,24 @@
+[package]
+name = "agnt-mcp"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["doop"]
+description = "Model Context Protocol (MCP) client for the agnt agent runtime — stdio transport, tool discovery, and Tool impls that route to external MCP servers."
+repository = "https://github.com/hmbldv/agnt"
+homepage = "https://github.com/hmbldv/agnt"
+documentation = "https://docs.rs/agnt-mcp"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["agent", "llm", "mcp", "model-context-protocol"]
+categories = ["api-bindings"]
+
+[lib]
+name = "agnt_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+agnt-core = { version = "0.3", path = "../agnt-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
