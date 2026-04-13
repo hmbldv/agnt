@@ -108,6 +108,14 @@ pub mod builtins {
     pub use agnt_tools::builtins::*;
 }
 
+// Sandbox primitive, re-exported at the flagship crate root so consumers
+// don't have to pull `agnt-tools` directly for the most common
+// sandbox-aware tool construction pattern (`ReadFile::with_sandbox(Arc<…>)`).
+// Added in v0.3.2 after SOLA became the first real downstream consumer
+// and surfaced the ergonomic gap.
+#[cfg(feature = "tools")]
+pub use agnt_tools::FilesystemRoot;
+
 // v0.3: #[tool] proc-macro. Feature-gated so crates that want a minimal
 // agnt-core footprint can skip the proc-macro compile cost.
 #[cfg(feature = "macros")]

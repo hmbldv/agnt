@@ -4,6 +4,32 @@ All notable changes to `agnt` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-04-12
+
+Flagship-crate-only ergonomics patch. No underlying crate (`agnt-core`,
+`agnt-net`, `agnt-store`, `agnt-tools`, `agnt-macros`, `agnt-mcp`)
+changes — they remain at `0.3.1`.
+
+### ✨ New (flagship re-export)
+
+- **`agnt::FilesystemRoot`** — now re-exported from the flagship crate
+  under the `tools` feature. v0.3.1 shipped the sandbox primitive but
+  only at `agnt_tools::FilesystemRoot`, which forced consumers of the
+  flagship meta-crate to add a second direct dependency on
+  `agnt-tools` just to build a sandbox instance. SOLA was the first
+  real downstream consumer and surfaced the gap on the v0.3.1 upgrade
+  path. One-line fix, no API breakage.
+
+Usage is now:
+
+```rust
+use std::sync::Arc;
+use agnt::{FilesystemRoot, builtins::ReadFile};
+
+let root = Arc::new(FilesystemRoot::new("/home/user/workspace")?);
+let read_file = ReadFile::with_sandbox(root.clone());
+```
+
 ## [0.3.1] — 2026-04-12
 
 Security + correctness patch. Adversarial review of the v0.3 release
