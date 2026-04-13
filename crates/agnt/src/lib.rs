@@ -1,8 +1,10 @@
 //! # agnt
 //!
-//! A dense, sync-first Rust agent engine. Multi-backend LLM inference with streaming,
-//! parallel tool dispatch, SQLite session persistence, and microsecond-level tool
-//! profiling — in under 1,500 lines of code with no async runtime required.
+//! A dense, sync-first Rust agent engine. Multi-backend LLM inference
+//! with streaming, parallel tool dispatch, SQLite session persistence,
+//! and microsecond-level tool profiling — no async runtime required.
+//! Around 6,000 LOC across seven crates as of v0.3.1; see the repository
+//! README for the live breakdown.
 //!
 //! ## Quick start
 //!
@@ -18,35 +20,46 @@
 //! println!("{}", reply);
 //! ```
 //!
-//! ## Architecture (v0.2 — multi-crate workspace)
+//! ## Architecture (v0.3.1 — seven-crate workspace)
 //!
-//! The flagship `agnt` crate is a thin re-export over four underlying crates:
+//! The flagship `agnt` crate is a thin re-export over six underlying
+//! library crates. Everything is feature-gated so consumers can pick
+//! the slice they need — WASM / embedded callers depend only on
+//! `agnt-core`.
 //!
-//! - [`agnt-core`](https://crates.io/crates/agnt-core) — traits, types, and
-//!   the sync agent loop. Zero I/O dependencies; compiles to WASM.
+//! - [`agnt-core`](https://crates.io/crates/agnt-core) — traits, types,
+//!   agent loop, quotas, observer hooks. Zero I/O dependencies.
 //! - [`agnt-net`](https://crates.io/crates/agnt-net) — HTTP backend
-//!   implementation (Ollama / OpenAI / Anthropic). Behind the `net` feature.
-//! - [`agnt-store`](https://crates.io/crates/agnt-store) — SQLite message
-//!   store. Behind the `store` feature.
-//! - [`agnt-tools`](https://crates.io/crates/agnt-tools) — built-in tools
-//!   (filesystem, search, fetch). Behind the `tools` feature. Shell is
-//!   opt-in via `tools-shell`.
+//!   implementation (Ollama / OpenAI / Anthropic). `net` feature.
+//! - [`agnt-store`](https://crates.io/crates/agnt-store) — SQLite
+//!   message store with µs-precision tool log. `store` feature.
+//! - [`agnt-tools`](https://crates.io/crates/agnt-tools) — built-in
+//!   tools with filesystem sandbox, atomic SSRF-guarded Fetch, and
+//!   opt-in Shell (plus `bwrap-shell` on Linux). `tools` feature.
+//! - [`agnt-macros`](https://crates.io/crates/agnt-macros) — `#[tool]`
+//!   attribute macro. `macros` feature (default on).
+//! - [`agnt-mcp`](https://crates.io/crates/agnt-mcp) — MCP stdio
+//!   client. `mcp` feature (off by default).
 //!
-//! All three feature flags are on by default so `cargo add agnt` gives you
-//! the full runtime. Opt out for minimal / embedded / WASM use.
+//! `default = ["net", "store", "tools", "macros"]` gives you the
+//! working runtime from a single `cargo add agnt`. Opt in to `mcp`
+//! and `tools-bwrap-shell` as needed.
 //!
 //! ## Design principles
 //!
 //! 1. **Sync-first.** No tokio required. Tool dispatch uses
 //!    [`std::thread::scope`] for parallelism without an async runtime.
-//! 2. **Dense.** Every module is small, focused, and auditable.
-//! 3. **Multi-backend from day one.** One internal `Message` type; providers
-//!    translate at the wire boundary.
-//! 4. **Structurally sandboxed.** v0.2 adds filesystem root, SSRF guards, and
-//!    opt-in Shell so adversarial LLM output can't escape the probe.
+//! 2. **Structurally sandboxed.** Filesystem root, atomic SSRF
+//!    resolver, opt-in Shell, optional bubblewrap — each layer is
+//!    designed assuming the LLM output is hostile.
+//! 3. **Multi-backend from day one.** One internal `Message` type;
+//!    providers translate at the wire boundary.
+//! 4. **Auditable by module.** Security-critical paths (agent loop,
+//!    tools, sandbox, SSRF resolver, MCP framing) each live in a
+//!    single small file so reviewers can read them in isolation.
 //!
 //! See the [README](https://github.com/hmbldv/agnt) for benchmarks, the
-//! v0.2 threat model, and the roadmap.
+//! current threat model, and the roadmap.
 
 // Core types and traits — always re-exported.
 pub use agnt_core::{

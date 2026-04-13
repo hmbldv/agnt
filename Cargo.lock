@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agnt"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agnt-core",
  "agnt-macros",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "serde",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-macros"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agnt-core",
  "proc-macro2",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agnt-core",
  "serde",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-net"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agnt-core",
  "native-tls",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-rs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agnt",
  "serde_json",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agnt-core",
  "rusqlite",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-tools"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "agnt-core",
  "fs2",

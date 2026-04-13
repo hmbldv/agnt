@@ -504,6 +504,28 @@ fn read_sse_line<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Resul
     Ok(true)
 }
 
+/// Fuzzing / integration-test hook for the OpenAI SSE parser.
+///
+/// Not part of the stable API — `#[doc(hidden)]` and behind the
+/// `fuzz-api` feature so libfuzzer targets can exercise the stream
+/// parser without the parser itself becoming `pub`. See
+/// `fuzz/fuzz_targets/fuzz_openai_sse.rs`.
+#[doc(hidden)]
+#[cfg(feature = "fuzz-api")]
+pub fn _fuzz_parse_openai_stream(bytes: &[u8]) -> Result<Message, String> {
+    let mut sink = |_s: &str| {};
+    parse_openai_stream(bytes, &mut sink)
+}
+
+/// Fuzzing hook for the Anthropic SSE parser. See
+/// [`_fuzz_parse_openai_stream`].
+#[doc(hidden)]
+#[cfg(feature = "fuzz-api")]
+pub fn _fuzz_parse_anthropic_stream(bytes: &[u8]) -> Result<Message, String> {
+    let mut sink = |_s: &str| {};
+    parse_anthropic_stream(bytes, &mut sink)
+}
+
 fn parse_openai_stream<R: Read>(
     resp: R,
     sink: &mut dyn FnMut(&str),

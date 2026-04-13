@@ -13,6 +13,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 agnt-core  = { path = "../crates/agnt-core" }
 agnt-tools = { path = "../crates/agnt-tools" }
+agnt-net   = { path = "../crates/agnt-net", features = ["fuzz-api"] }
+ureq       = { version = "2.12", default-features = false, features = ["json", "native-tls"] }
 
 # Prevent this crate from being absorbed into the parent workspace.
 [workspace]
@@ -44,6 +46,27 @@ bench = false
 [[bin]]
 name = "fuzz_tool_call_dispatch"
 path = "fuzz_targets/fuzz_tool_call_dispatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_openai_sse"
+path = "fuzz_targets/fuzz_openai_sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_anthropic_sse"
+path = "fuzz_targets/fuzz_anthropic_sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ssrf_resolver"
+path = "fuzz_targets/fuzz_ssrf_resolver.rs"
 test = false
 doc = false
 bench = false

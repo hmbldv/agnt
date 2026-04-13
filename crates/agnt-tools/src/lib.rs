@@ -19,18 +19,24 @@
 //!   `with_sandbox`. Without a sandbox they can read / write / list anywhere
 //!   the process has access; with one, every path is canonicalized and
 //!   rejected if it escapes the root.
-//! - `Fetch` has a built-in SSRF guard: http/https only, IPv4/IPv6
-//!   private / loopback / link-local / multicast / metadata addresses
-//!   rejected, redirects disabled on the shared ureq agent.
+//! - `Fetch` has a built-in SSRF guard that runs *atomically* with DNS
+//!   resolution via a custom [`ureq::Resolver`] ([`ssrf::SsrfResolver`]).
+//!   http/https only, IPv4/IPv6 private / loopback / link-local /
+//!   multicast / metadata addresses rejected in the same lookup that
+//!   `ureq` then uses to connect — no DNS-rebinding TOCTOU. Redirects
+//!   are disabled on the per-instance agent.
 //! - `Shell` is gated behind the `shell` cargo feature; it has no
-//!   unsandboxed constructor. See its rustdoc for the threat model.
+//!   unsandboxed constructor. On Linux, the `bwrap-shell` feature adds
+//!   a bubblewrap namespace on top of the argv allowlist for defense
+//!   in depth.
 //!
-//! See the v0.2 threat model (`agnt-v0.2-plan.md` Part 2 S1–S7) for
-//! details.
+//! See `THREAT_MODEL.md` in the repo root for the current threat model
+//! (updated for v0.3.1).
 
 pub mod builtins;
 pub mod http;
 pub mod sandbox;
+pub mod ssrf;
 
 pub use builtins::{EditFile, Fetch, Glob, Grep, ListDir, ReadFile, WriteFile};
 pub use sandbox::FilesystemRoot;

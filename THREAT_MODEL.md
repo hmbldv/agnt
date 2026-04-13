@@ -1,7 +1,25 @@
-# agnt v0.2 Threat Model
+# agnt Threat Model (current: v0.3.1)
 
-This document describes what `agnt` defends against in v0.2, what it does not,
-and the assumptions behind its security posture.
+This document describes what `agnt` defends against, what it does not,
+and the assumptions behind its security posture. Updated for v0.3.1.
+
+## Changelog
+
+- **v0.3.1** — Closes the DNS rebinding TOCTOU in `Fetch` by moving the
+  SSRF guard into a custom `ureq::Resolver` so validation and lookup
+  are the same operation. Bounds the MCP stdio reader at 4 MiB per
+  line to eliminate the unbounded-allocation DoS. Adds
+  `Agent::max_step_duration` for a coarse per-step wall-clock deadline.
+  Adds SSE stream parser and SSRF resolver fuzz targets. Preserves
+  panicked-tool attribution through the dispatch boundary.
+- **v0.3.0** — Adds `#[tool]` proc-macro, MCP stdio client, per-tool
+  quotas, `Observer::should_dispatch` policy hook, bubblewrap sandbox
+  on top of the Shell argv allowlist. No new Critical findings vs
+  v0.2.
+- **v0.2.0** — Hardening release: Shell opt-in with argv allowlist
+  (was denylist-bypassable), FilesystemRoot sandbox (was unbounded),
+  SSRF guard on Fetch (was absent). v0.1.0 yanked the same day it
+  was published because of three Critical findings.
 
 ## Adversary
 
@@ -51,19 +69,31 @@ These attack classes are structurally blocked in v0.2:
 
 ### Network access
 
-- **SSRF to AWS IMDS (169.254.169.254) or GCP metadata** — blocked by
-  `Fetch::ssrf_check`. Both addresses are rejected by name and by IP.
+- **SSRF to AWS IMDS (169.254.169.254) or GCP metadata** — blocked
+  atomically inside `agnt_tools::ssrf::SsrfResolver`. Both addresses
+  are rejected by name and by IP.
 - **SSRF to loopback / localhost** — blocked. `127.0.0.0/8` and `::1`
   rejected.
 - **SSRF to private IPv4 ranges** — blocked. `10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16` rejected via `Ipv4Addr::is_private()`.
 - **SSRF to link-local and unique local IPv6** — blocked. `fe80::/10` and
   `fc00::/7` rejected.
-- **Redirect-based SSRF bypass** — blocked. `Fetch`'s ureq agent has
-  `redirects(0)` set, so a hostile server cannot bounce the client to an
-  internal target via a `302 Location:` header.
+- **DNS rebinding / check-vs-use TOCTOU** — blocked as of v0.3.1.
+  `Fetch` installs `SsrfResolver` as its `ureq::Agent`'s resolver, so
+  validation happens inside the same DNS lookup whose result ureq then
+  uses to connect. There is no second lookup to flip. A hostile
+  authority cannot serve a safe IP at check time and a private IP at
+  request time because there is only one resolution. This closes the
+  v0.2/v0.3 two-phase gap where `ssrf_check` ran ahead of `ureq.get`.
+- **Redirect-based SSRF bypass** — blocked. `Fetch`'s per-instance
+  ureq agent has `redirects(0)` set, so a hostile server cannot
+  bounce the client to an internal target via a `302 Location:`
+  header. The model must re-call `Fetch` with the redirect target
+  explicitly, re-triggering resolver validation.
 - **Non-HTTP schemes (`file://`, `ftp://`, `gopher://`)** — blocked. Only
-  `http` and `https` are accepted.
+  `http` and `https` are accepted. Scheme check runs in
+  `fetch_url_shape_check` before the ureq agent touches the URL,
+  because the resolver only sees the netloc, not the scheme.
 
 ### Concurrency and atomicity
 
@@ -98,9 +128,25 @@ These attack classes are structurally blocked in v0.2:
 - **`.expect()` / `.unwrap()` panics crashing the agent** — fixed. Every
   library path panic site has been replaced with proper `Result` return.
   TLS init is lazy and fallible. Scoped-thread panics during tool dispatch
-  are caught and converted to error strings; the loop continues.
+  are caught and converted to error strings; the loop continues. As of
+  v0.3.1 the panicked-tool path also preserves `tool_call_id` and
+  `Tool::name()` through the join-fallback, so SQLite tool logs and
+  downstream observers keep attribution instead of seeing an empty
+  `<panicked>` placeholder.
 - **Integer overflow in retry backoff math** — checked. Backoff is capped
   at 8 seconds, so the math never overflows.
+- **MCP server flooding the reader with an unbounded line** — fixed in
+  v0.3.1. `agnt_mcp` uses a bounded `read_bounded_line` helper capped
+  at `MAX_LINE_BYTES` (4 MiB). Overflow emits a protocol error on the
+  channel and closes the reader; the stream is unrecoverable but the
+  agent process does not OOM.
+- **Runaway step() tied to a slow tool or slow backend** — bounded in
+  v0.3.1 via `Agent::max_step_duration`. When set, the step loop
+  refuses to begin a new backend call or tool dispatch past the
+  deadline. Granularity is between operations — a single tool that
+  has already started runs to its own timeout — but combined with
+  `Fetch`'s 10s connect / 120s read defaults, the worst-case hang
+  is bounded.
 
 ### Transport security
 
@@ -161,7 +207,16 @@ to detect suspicious patterns if this is in your threat model.
 
 A model stuck in a loop of tool calls will consume CPU, memory, tokens
 (API cost), and GPU (local inference) up to `Agent::max_steps`. The
-default is 10. Set it conservatively. v0.3 adds per-tool quotas.
+default is 10. Set it conservatively. v0.3 added per-tool quotas
+(`ToolQuota::max_calls` / `max_duration_us` / `max_result_bytes`),
+and v0.3.1 added `Agent::max_step_duration` for a wall-clock ceiling
+on a whole `step()` call. Note that `max_duration_us` is enforced at
+*turn boundaries* within a step — concurrent calls to the same
+quotaed tool in one turn all pass the duration check (they see a
+zero counter); use `max_calls = 1` to serialize them if you need
+strict per-turn wall time. Session-wide quotas across multiple
+`step()` calls are not provided in v0.3.x; the operator is
+responsible.
 
 ### Race conditions in third-party tools
 
@@ -187,9 +242,9 @@ namespaces, seccomp, bubblewrap).
 ### Compromised dependencies
 
 `agnt` depends on `ureq`, `native-tls`, `rusqlite`, `walkdir`, `regex`,
-`glob`, `fs2`, `url`, `shell-words`, `tracing`, and `serde*`. A supply-chain
-compromise in any of these affects `agnt`. `cargo audit` is clean as of
-the v0.2 release (0 advisories).
+`glob`, `fs2`, `url`, `shell-words`, `tracing`, `syn`/`quote`/`proc-macro2`
+(via `agnt-macros`), and `serde*`. A supply-chain compromise in any of
+these affects `agnt`. Run `cargo audit` before each release.
 
 ## Reporting vulnerabilities
 
@@ -198,5 +253,7 @@ If you find a security issue in `agnt`, please open a GitHub issue marked
 maintainer directly. Do not post exploits publicly before a fix is released.
 
 v0.1.0 was yanked the same day it was published because of three Critical
-findings (Shell RCE, path traversal, SSRF). The v0.2 pass addressed all
-three. New findings will be triaged with the same urgency.
+findings (Shell RCE, path traversal, SSRF). The v0.2 hardening pass
+addressed all three. v0.3.1 closed a High-severity DNS rebinding
+TOCTOU in `Fetch` that the v0.3 adversarial review identified. New
+findings will be triaged with the same urgency.

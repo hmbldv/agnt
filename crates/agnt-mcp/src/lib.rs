@@ -46,6 +46,18 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 /// Per-request timeout. Hard-coded for v0.3.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Maximum bytes accepted on a single JSON-RPC line from an MCP server.
+///
+/// The v0.3 release shipped with an unbounded `BufReader::read_line` which
+/// meant a hostile or buggy server could stream a multi-gigabyte line and
+/// OOM the agent process. v0.3.1 caps the reader at 4 MiB: enough headroom
+/// for any well-behaved tool response (the MCP examples peak in the tens
+/// of KiB) while keeping the blast radius of a broken peer finite. On
+/// overflow the reader emits an `McpError::Protocol("line too long")`
+/// via the message channel and closes — the client cannot recover the
+/// stream because stdio framing is no longer reliable.
+pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -138,6 +150,90 @@ fn default_schema() -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded line reader (v0.3.1 DoS fix)
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single bounded-line read. Separated from the error
+/// variant so the reader thread can distinguish a clean EOF from a
+/// completed line without unwrapping a union.
+enum BoundedRead {
+    /// The reader returned 0 bytes before hitting a newline. EOF.
+    Eof,
+    /// One full line (without the trailing `\n`) is now in the buffer.
+    Line,
+}
+
+/// Failure modes for [`read_bounded_line`].
+#[derive(Debug)]
+enum BoundedReadError {
+    /// Peer exceeded [`MAX_LINE_BYTES`] without a newline. Treated as a
+    /// hard close because stdio framing is no longer reliable.
+    Overflow,
+    /// Underlying `std::io` read error. Caller converts to Eof for the
+    /// mpsc channel.
+    #[allow(dead_code)]
+    Io(std::io::Error),
+}
+
+/// Read from `reader` into `buf` up to (and including) the next `\n`,
+/// refusing to grow past `limit` bytes. On success the trailing newline
+/// is stripped, so callers can `str::from_utf8(&buf)` directly.
+///
+/// This is intentionally a one-byte-at-a-time loop rather than
+/// `read_until` because `std::io::BufRead::read_until` has no way to
+/// cap its growth — it will happily allocate a gigabyte if that's what
+/// the peer sends. Byte-level reads are fine here: the child process
+/// stdout is already line-buffered by convention (one JSON-RPC frame
+/// per line) and the inner `BufReader` amortises the syscalls.
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    limit: usize,
+) -> Result<BoundedRead, BoundedReadError> {
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => {
+                if b.is_empty() {
+                    // Peer closed. Whether we had a partial line or
+                    // not, the stream is unrecoverable — frame the
+                    // result as EOF so the caller reports Closed.
+                    return Ok(BoundedRead::Eof);
+                }
+                b
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(BoundedReadError::Io(e)),
+        };
+        let (chunk, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(i) => (&available[..=i], true),
+            None => (available, false),
+        };
+        if buf.len() + chunk.len() > limit.saturating_add(1) {
+            // +1 for the trailing newline which we strip before the cap
+            // check would otherwise trigger on a line exactly at `limit`.
+            let take = limit.saturating_add(1).saturating_sub(buf.len());
+            buf.extend_from_slice(&chunk[..take]);
+            let consumed = take;
+            reader.consume(consumed);
+            return Err(BoundedReadError::Overflow);
+        }
+        buf.extend_from_slice(chunk);
+        let consumed = chunk.len();
+        reader.consume(consumed);
+        if done {
+            // Strip the trailing '\n' and any preceding '\r' (CRLF hosts).
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+            }
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(BoundedRead::Line);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // McpClient
 // ---------------------------------------------------------------------------
 
@@ -160,6 +256,11 @@ enum ReaderMsg {
     Line(String),
     /// Stdout hit EOF.
     Eof,
+    /// A framing-level failure the client cannot recover from — e.g. a
+    /// line longer than [`MAX_LINE_BYTES`] or a non-UTF-8 byte sequence
+    /// on a supposedly JSON-encoded stream. Treated as a hard close by
+    /// the main loop.
+    Error(String),
 }
 
 impl McpClient {
@@ -185,20 +286,41 @@ impl McpClient {
         let (tx, rx) = mpsc::channel();
         let reader_thread = thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
+            // Bounded, byte-level read loop. `BufReader::read_until` lets
+            // us enforce [`MAX_LINE_BYTES`] before we ever allocate a full
+            // line into memory — a hostile MCP server streaming 1 GB of
+            // garbage terminates on overflow instead of OOMing the agent.
+            let mut buf: Vec<u8> = Vec::with_capacity(4096);
             loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => {
+                buf.clear();
+                match read_bounded_line(&mut reader, &mut buf, MAX_LINE_BYTES) {
+                    Ok(BoundedRead::Eof) => {
                         let _ = tx.send(ReaderMsg::Eof);
                         return;
                     }
-                    Ok(_) => {
-                        if tx.send(ReaderMsg::Line(line.clone())).is_err() {
-                            return;
+                    Ok(BoundedRead::Line) => {
+                        match std::str::from_utf8(&buf) {
+                            Ok(s) => {
+                                if tx.send(ReaderMsg::Line(s.to_string())).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(_) => {
+                                let _ = tx.send(ReaderMsg::Error(
+                                    "non-utf8 bytes on mcp stdout".into(),
+                                ));
+                                return;
+                            }
                         }
                     }
-                    Err(_) => {
+                    Err(BoundedReadError::Overflow) => {
+                        let _ = tx.send(ReaderMsg::Error(format!(
+                            "mcp line exceeded {} bytes",
+                            MAX_LINE_BYTES
+                        )));
+                        return;
+                    }
+                    Err(BoundedReadError::Io(_)) => {
                         let _ = tx.send(ReaderMsg::Eof);
                         return;
                     }
@@ -218,7 +340,7 @@ impl McpClient {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": { "name": "agnt-mcp", "version": "0.3.0" }
+            "clientInfo": { "name": "agnt-mcp", "version": "0.3.1" }
         });
         let _ = this.request("initialize", Some(params))?;
 
@@ -402,6 +524,7 @@ impl McpClient {
                     return Ok(resp.result.unwrap_or(Value::Null));
                 }
                 Ok(ReaderMsg::Eof) => return Err(McpError::Closed),
+                Ok(ReaderMsg::Error(msg)) => return Err(McpError::Protocol(msg)),
                 Err(RecvTimeoutError::Timeout) => return Err(McpError::Timeout),
                 Err(RecvTimeoutError::Disconnected) => return Err(McpError::Closed),
             }
@@ -638,5 +761,80 @@ mod tests {
         assert_eq!(McpError::Closed.to_string(), "mcp channel closed");
         assert!(McpError::Io("x".into()).to_string().contains("io"));
         assert!(McpError::Protocol("x".into()).to_string().contains("protocol"));
+    }
+
+    // ---- v0.3.1 bounded reader DoS fix -----------------------------------
+
+    #[test]
+    fn bounded_reader_accepts_short_line() {
+        let input: &[u8] = b"hello\n";
+        let mut r = std::io::BufReader::new(input);
+        let mut buf = Vec::new();
+        let outcome = read_bounded_line(&mut r, &mut buf, 1024).unwrap_or_else(|_| {
+            panic!("should accept short line")
+        });
+        assert!(matches!(outcome, BoundedRead::Line));
+        assert_eq!(buf, b"hello");
+    }
+
+    #[test]
+    fn bounded_reader_strips_crlf() {
+        let input: &[u8] = b"crlf\r\n";
+        let mut r = std::io::BufReader::new(input);
+        let mut buf = Vec::new();
+        read_bounded_line(&mut r, &mut buf, 1024).expect("ok");
+        assert_eq!(buf, b"crlf");
+    }
+
+    #[test]
+    fn bounded_reader_reports_eof_on_empty() {
+        let input: &[u8] = b"";
+        let mut r = std::io::BufReader::new(input);
+        let mut buf = Vec::new();
+        match read_bounded_line(&mut r, &mut buf, 1024).expect("ok") {
+            BoundedRead::Eof => {}
+            BoundedRead::Line => panic!("expected EOF"),
+        }
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_line() {
+        // 32 KB of 'x' with no newline should hit the limit.
+        let big: Vec<u8> = vec![b'x'; 32 * 1024];
+        let mut r = std::io::BufReader::new(&big[..]);
+        let mut buf = Vec::new();
+        let err = read_bounded_line(&mut r, &mut buf, 8 * 1024);
+        assert!(matches!(err, Err(BoundedReadError::Overflow)));
+    }
+
+    #[test]
+    fn bounded_reader_rejects_line_just_over_limit() {
+        // N bytes + '\n' where N == limit + 1 should overflow.
+        let mut big: Vec<u8> = vec![b'a'; 1025];
+        big.push(b'\n');
+        let mut r = std::io::BufReader::new(&big[..]);
+        let mut buf = Vec::new();
+        let err = read_bounded_line(&mut r, &mut buf, 1024);
+        assert!(matches!(err, Err(BoundedReadError::Overflow)));
+    }
+
+    #[test]
+    fn bounded_reader_handles_multi_line_stream() {
+        let input: &[u8] = b"one\ntwo\nthree\n";
+        let mut r = std::io::BufReader::new(input);
+        let mut buf = Vec::new();
+        read_bounded_line(&mut r, &mut buf, 1024).expect("one");
+        assert_eq!(buf, b"one");
+        buf.clear();
+        read_bounded_line(&mut r, &mut buf, 1024).expect("two");
+        assert_eq!(buf, b"two");
+        buf.clear();
+        read_bounded_line(&mut r, &mut buf, 1024).expect("three");
+        assert_eq!(buf, b"three");
+        buf.clear();
+        match read_bounded_line(&mut r, &mut buf, 1024).expect("eof") {
+            BoundedRead::Eof => {}
+            BoundedRead::Line => panic!("expected EOF after exhausting input"),
+        }
     }
 }

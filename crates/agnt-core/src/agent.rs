@@ -101,7 +101,35 @@ pub struct Agent<B: LlmBackend> {
     pub max_tool_result_bytes: usize,
     /// Per-tool quotas (v0.3 M3). Lookup key is `Tool::name()`. Unset tools
     /// have no quota (unlimited).
+    ///
+    /// **Enforcement boundary.** Quotas are checked at turn boundaries
+    /// inside a single [`Agent::step`] call. `max_calls` reserves its
+    /// counter before dispatch — multiple concurrent calls to the same
+    /// tool in one turn contend correctly. `max_duration_us` accumulates
+    /// *after* the parallel dispatch finishes, so the first turn's
+    /// concurrent calls all pass (they see `duration_us = 0`) and the
+    /// quota only bites on the *next* turn. If you need strict per-turn
+    /// wall time across multiple concurrent calls to the same tool, set
+    /// `max_calls = 1` to serialize them, or use `max_step_duration` for
+    /// a coarser per-step ceiling.
     pub tool_quotas: HashMap<String, ToolQuota>,
+    /// Wall-clock deadline for a single [`Agent::step`] call.
+    ///
+    /// When set, `step()` tracks total elapsed time from the moment it
+    /// starts and refuses to begin a new backend call (or a new tool
+    /// dispatch) past the deadline — returning `Err("step deadline
+    /// exceeded")`. This is the coarse-but-reliable way to bound an
+    /// adversarial turn: a hung tool or a slow backend can't pin the
+    /// agent forever.
+    ///
+    /// Granularity is *between* backend/tool operations; a single
+    /// hung tool that has already started dispatch still runs to its
+    /// own timeout (each tool is responsible for its own read/connect
+    /// timeouts — `Fetch` sets 10s connect / 120s read by default).
+    /// Combine with tool-level timeouts for hard cancellation.
+    ///
+    /// `None` (default) preserves v0.2/v0.3 behavior: no step deadline.
+    pub max_step_duration: Option<std::time::Duration>,
     /// Optional persistence layer.
     pub store: Option<Arc<dyn MessageStore>>,
     /// Session identifier for the store (defaults to "default").
@@ -149,6 +177,7 @@ impl<B: LlmBackend> Agent<B> {
             max_window: 40,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
             tool_quotas: HashMap::new(),
+            max_step_duration: None,
             store: None,
             session: "default".into(),
             observer: Arc::new(NoOpObserver),
@@ -303,7 +332,29 @@ impl<B: LlmBackend> Agent<B> {
         // this step() call. Resets only on return from step().
         let mut quota_usage: HashMap<String, QuotaUsage> = HashMap::new();
 
+        // v0.3.1: wall-clock deadline for the whole step(). Checked at
+        // the top of every turn and again before dispatch. `None`
+        // preserves the unbounded v0.3 behavior.
+        let step_started = std::time::Instant::now();
+        let deadline_check = |stage: &str| -> Result<(), String> {
+            if let Some(limit) = self.max_step_duration {
+                if step_started.elapsed() >= limit {
+                    return Err(format!(
+                        "step deadline exceeded at {}: {}ms >= {}ms",
+                        stage,
+                        step_started.elapsed().as_millis(),
+                        limit.as_millis()
+                    ));
+                }
+            }
+            Ok(())
+        };
+
         for _ in 0..self.max_steps {
+            if let Err(e) = deadline_check("turn_start") {
+                self.observer.on_step_error(&e);
+                return Err(e);
+            }
             // P1: avoid full-window clone. When history fits, borrow
             // self.messages directly. When truncation is required, build
             // just the minimum vector of messages that are actually sent.
@@ -411,6 +462,11 @@ impl<B: LlmBackend> Agent<B> {
                 .expect("has_calls checked above")
                 .clone();
 
+            if let Err(e) = deadline_check("pre_dispatch") {
+                self.observer.on_step_error(&e);
+                return Err(e);
+            }
+
             // v0.3 C2 + M3: sequentially evaluate each call's disposition
             // (observer policy check) and quota state BEFORE spawning any
             // scoped thread. Calls that are refused or over-quota get a
@@ -481,18 +537,38 @@ impl<B: LlmBackend> Agent<B> {
             // as the tool result, so the loop continues. Refused calls
             // (C2/M3) skip the actual dispatch but still fire on_tool_start
             // / on_tool_end so observers see the full lifecycle.
-            let results: Vec<(String, String, String, String, u64)> =
+            // (tool_call_id, tool_name, args_json, result_body, duration_us).
+            // Same shape coming out of the scoped threads and the join
+            // fallback, so the downstream message-assembly loop can treat
+            // panicked and successful paths uniformly.
+            type ToolOutcome = (String, String, String, String, u64);
+            let results: Vec<ToolOutcome> =
                 std::thread::scope(|s| {
-                    let handles: Vec<_> = calls
+                    // We carry (id, name, args_str) alongside each handle so
+                    // a panicked worker thread keeps its attribution on the
+                    // way out. v0.3 dropped these fields into empty strings
+                    // in the join fallback, which meant the SQLite tool_log
+                    // and downstream observers couldn't tell which tool
+                    // blew up. v0.3.1 threads the sidecar through.
+                    type Handle<'s> = (
+                        std::thread::ScopedJoinHandle<'s, ToolOutcome>,
+                        String,
+                        String,
+                        String,
+                    );
+                    let handles: Vec<Handle<'_>> = calls
                         .iter()
                         .zip(decisions.into_iter())
                         .map(|(call, decision)| {
                             let name = call.function.name.clone();
                             let id = call.id.clone();
                             let args_str = call.function.arguments.clone();
+                            let sidecar_id = id.clone();
+                            let sidecar_name = name.clone();
+                            let sidecar_args = args_str.clone();
                             let observer = observer.clone();
                             let call_clone = call.clone();
-                            s.spawn(move || {
+                            let handle = s.spawn(move || {
                                 let _tool_span = info_span!(
                                     "agnt.tool",
                                     name = %name,
@@ -531,18 +607,25 @@ impl<B: LlmBackend> Agent<B> {
                                 };
                                 observer.on_tool_end(&call_clone, &tool_result);
                                 (id, name, args_str, result, dur)
-                            })
+                            });
+                            (handle, sidecar_id, sidecar_name, sidecar_args)
                         })
                         .collect();
                     handles
                         .into_iter()
-                        .map(|h| {
+                        .map(|(h, id, name, args_str)| {
                             h.join().unwrap_or_else(|panic_payload| {
                                 let msg = panic_to_string(panic_payload);
+                                warn!(
+                                    tool = %name,
+                                    id = %id,
+                                    panic = %msg,
+                                    "tool thread panicked"
+                                );
                                 (
-                                    String::new(),
-                                    "<panicked>".to_string(),
-                                    String::new(),
+                                    id,
+                                    name,
+                                    args_str,
                                     format!("error: tool thread panicked: {}", msg),
                                     0,
                                 )
@@ -943,5 +1026,97 @@ mod tests {
                 && m.content.as_deref().map(|c| c.contains("refused by observer")).unwrap_or(false)
         });
         assert!(refused);
+    }
+
+    // ---- v0.3.1 max_step_duration deadline -------------------------------
+
+    /// Tool that blocks for a fixed duration so we can drive the deadline.
+    struct SleepyTool {
+        dur: std::time::Duration,
+    }
+    impl Tool for SleepyTool {
+        fn name(&self) -> &str { "sleepy" }
+        fn description(&self) -> &str { "sleeps" }
+        fn schema(&self) -> Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+        fn call(&self, _args: Value) -> Result<String, String> {
+            std::thread::sleep(self.dur);
+            Ok("awake".into())
+        }
+    }
+
+    #[test]
+    fn max_step_duration_terminates_runaway_loop() {
+        // Script: two tool-call turns. Each tool call sleeps 80ms. The
+        // deadline is 100ms so the *second* turn's pre_dispatch check
+        // must fail before the second tool runs.
+        let script = vec![
+            tool_call("c1", "sleepy"),
+            tool_call("c2", "sleepy"),
+        ];
+        #[allow(deprecated)]
+        let mut a = Agent::new(ScriptedBackend::new(script), "sys");
+        a.tools.register(Box::new(SleepyTool {
+            dur: std::time::Duration::from_millis(80),
+        }));
+        a.max_step_duration = Some(std::time::Duration::from_millis(100));
+        let err = a.step("go").expect_err("deadline must fire");
+        assert!(err.contains("step deadline"), "got: {}", err);
+    }
+
+    #[test]
+    fn no_deadline_means_no_deadline() {
+        // Baseline: without max_step_duration, the same slow sequence
+        // runs to completion.
+        let script = vec![tool_call("c1", "sleepy")];
+        #[allow(deprecated)]
+        let mut a = Agent::new(ScriptedBackend::new(script), "sys");
+        a.tools.register(Box::new(SleepyTool {
+            dur: std::time::Duration::from_millis(20),
+        }));
+        // No deadline set.
+        let out = a.step("go").unwrap();
+        assert_eq!(out, "done");
+    }
+
+    // ---- v0.3.1 panic-name capture ---------------------------------------
+
+    struct PanickingTool;
+    impl Tool for PanickingTool {
+        fn name(&self) -> &str { "panicker" }
+        fn description(&self) -> &str { "always panics" }
+        fn schema(&self) -> Value {
+            serde_json::json!({"type":"object","properties":{}})
+        }
+        fn call(&self, _args: Value) -> Result<String, String> {
+            panic!("deliberate test panic");
+        }
+    }
+
+    #[test]
+    fn panicked_tool_preserves_attribution_in_transcript() {
+        // Script: one panicky call, then assistant text to end the loop.
+        let script = vec![tool_call("pc1", "panicker")];
+        #[allow(deprecated)]
+        let mut a = Agent::new(ScriptedBackend::new(script), "sys");
+        a.tools.register(Box::new(PanickingTool));
+        a.step("go").unwrap();
+        // The tool message must carry the original call id and tool name
+        // so the SQLite tool_log and downstream observers can attribute
+        // the panic correctly.
+        let tool_msg = a
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("tool message present");
+        assert_eq!(tool_msg.name.as_deref(), Some("panicker"));
+        assert_eq!(tool_msg.tool_call_id.as_deref(), Some("pc1"));
+        let body = tool_msg.content.as_deref().unwrap();
+        assert!(
+            body.contains("panicked") && body.contains("deliberate test panic"),
+            "panic body: {}",
+            body
+        );
     }
 }

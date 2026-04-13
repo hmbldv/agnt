@@ -38,7 +38,7 @@ struct as a thin streaming LLM client from some other framework.
   `agnt-tools::Fetch` (for SSRF reasons).
 - TLS init is lazy and fallible via `OnceLock<Result<_>>` — no first-call
   panic.
-- See the [v0.2 threat model](https://github.com/hmbldv/agnt/blob/main/THREAT_MODEL.md).
+- See the [threat model](https://github.com/hmbldv/agnt/blob/main/THREAT_MODEL.md).
 
 ## License
 

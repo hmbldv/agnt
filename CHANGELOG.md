@@ -4,6 +4,139 @@ All notable changes to `agnt` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-04-12
+
+Security + correctness patch. Adversarial review of the v0.3 release
+found one High-severity network issue (DNS rebinding TOCTOU in
+`Fetch`) and one High-severity DoS (unbounded MCP reader). Both are
+fixed. Plus a handful of P2 smells the review surfaced — panic
+attribution, deadline enforcement, stale docs, missing fuzz coverage.
+No breaking API changes for consumers on the default feature set.
+
+### 🔒 Security (High)
+
+- **DNS rebinding TOCTOU in `Fetch`** — fixed. v0.2/v0.3 had a
+  two-phase guard: `ssrf_check` resolved DNS and validated the IPs,
+  then handed the raw URL to `ureq`, which resolved DNS *again*
+  internally. A hostile authority with a short TTL could return a
+  safe public IP at check time and flip the record to a private
+  address (e.g. `169.254.169.254`, an RFC1918 range) before the
+  second lookup landed. v0.3.1 installs a custom `ureq::Resolver`
+  (`agnt_tools::ssrf::SsrfResolver`) on the `Fetch` agent so
+  validation happens inside the same lookup whose result ureq uses
+  to connect. Atomic. No gap. Each `Fetch` instance lazily builds
+  its own ureq agent with its own `allow_hosts` (via
+  `AgentBuilder::resolver`), so the per-instance allowlist composes
+  cleanly with the global IP ban.
+- **Unbounded MCP stdio reader** — fixed. v0.3 used
+  `BufReader::read_line` with no size cap, so a hostile or buggy
+  MCP server could stream a multi-gigabyte line and OOM the agent
+  process. v0.3.1 replaces the inner reader with
+  `read_bounded_line`, a byte-level loop capped at
+  `MAX_LINE_BYTES = 4 * 1024 * 1024`. On overflow the reader
+  emits `McpError::Protocol("mcp line exceeded 4194304 bytes")`
+  via the mpsc channel and closes — the stream is unrecoverable
+  but the process lives.
+
+### ✨ New
+
+- **`Agent::max_step_duration` — wall-clock per-step deadline.**
+  Optional `Duration`; when set, `step()` refuses to begin a new
+  backend call or tool dispatch past the deadline and returns
+  `Err("step deadline exceeded at ...")`. Granularity is between
+  operations — a tool that has already begun dispatch runs to its
+  own timeout — but combined with `Fetch`'s 10s/120s defaults, this
+  bounds the worst-case hang. `AgentBuilder::max_step_duration` is
+  the builder sugar.
+- **SSE stream parser + SSRF resolver fuzz targets.** The v0.3 fuzz
+  workspace skipped the backend stream parsers because they were
+  private; v0.3.1 exposes them as `#[doc(hidden)] pub` fn behind the
+  new `agnt-net/fuzz-api` feature and adds three new libfuzzer
+  targets: `fuzz_openai_sse`, `fuzz_anthropic_sse`, and
+  `fuzz_ssrf_resolver`. That's now 7 fuzz targets covering every
+  file the adversarial review flagged as high-value.
+- **`agnt_tools::ssrf` module** — public `SsrfResolver` type that
+  implements `ureq::Resolver` with the full validation chain. You
+  can install it on any ureq agent you build yourself if you want
+  an SSRF-guarded HTTP client outside of `Fetch`.
+
+### 🔧 Correctness
+
+- **Panicked tool preserves attribution.** v0.3 join-fallback
+  dropped `tool_call_id`, `Tool::name()`, and `args` into empty
+  strings so the SQLite `tool_log` entries for a panicked tool were
+  effectively anonymous. v0.3.1 carries a `(id, name, args)`
+  sidecar alongside each `ScopedJoinHandle` and threads it through
+  the panic path, so panics are attributable in logs, observers,
+  and the transcript.
+- **Quota enforcement semantics documented.** `ToolQuota::max_duration_us`
+  is enforced at *turn boundaries* inside a single `step()`, not
+  within a turn — concurrent calls to the same quotaed tool in one
+  turn all pass the duration check because they see a zero counter.
+  v0.3.1 rustdoc makes this explicit, and the threat model section
+  on resource exhaustion spells out the workaround (`max_calls = 1`
+  to serialize).
+- **`agnt_tools::http::agent()` deprecated.** The legacy shared
+  ureq agent had no resolver and cannot carry a per-`Fetch`
+  allowlist. It is marked `#[deprecated(since = "0.3.1")]` and
+  will be removed in v0.4. `Fetch` is the only documented way to
+  make attacker-influenced HTTP calls.
+
+### 📝 Documentation
+
+- **`#[tool]` schema limitation is now prominent.** Both the
+  crate-level docs and the proc-macro attribute rustdoc carry a
+  "⚠️ v0.3.x limitation" block explaining that the generated
+  `schema()` returns `{"type": "object"}` with no field metadata,
+  and that hand-writing a `TypedTool` impl may still be better UX
+  for non-trivial tools until the v0.4 schemars integration.
+- **`EditFile` lockfile DoS documented.** The sidecar lockfile
+  name is deterministic by design (for multi-agnt-process
+  coordination on the same host). Another local process can
+  pre-create it and DoS edits; that is out of the threat model and
+  is now called out in the `EditFile` rustdoc.
+- **LOC and crate-count claims updated throughout.** README,
+  `crates/agnt/src/lib.rs`, per-crate READMEs, and the threat
+  model all reflect the actual v0.3.1 shape — seven crates,
+  ~6,200 LOC — and drop the stale "1,500 LOC / 5-crate /
+  v0.2 threat model" references.
+- **Threat model refreshed for v0.3.1.** New entries for DNS
+  rebinding, unbounded MCP reader, panic attribution, the
+  `max_step_duration` deadline, and quota boundary semantics.
+
+### 🧪 Tests
+
+- +22 unit tests across the affected modules: 11 for `SsrfResolver`
+  (metadata blocklist, allowlist, loopback, private IPv4, link-local,
+  IPv6 ULA, IPv6 link-local, bracketed IPv6 literal, empty-address,
+  dual-stack rejection), 3 for `Fetch` exercising the resolver path
+  (`fetch_uses_ssrf_resolver_atomically`, the two IPv6 literal
+  cases), 6 for `read_bounded_line` (short line, CRLF, empty,
+  oversize, exactly-over-limit, multi-line stream), 2 for
+  `Agent::max_step_duration` (deadline fires, no-deadline baseline),
+  and 1 for panic attribution (`panicked_tool_preserves_attribution_in_transcript`).
+- Workspace totals: **101 passing** with default features (was 77),
+  **108 passing** with all agnt-tools features, **9 passing** with
+  `agnt-net/fuzz-api`. Zero failures. One test still `#[ignore]`'d
+  (the bwrap integration test that requires `bwrap` on `$PATH`).
+- All feature combinations I test manually:
+  `default`, `--no-default-features`, `--all-features`,
+  `agnt --features "mcp tools-shell tools-bwrap-shell"`,
+  `agnt-tools --features "shell bwrap-shell"`,
+  `agnt-net --features fuzz-api`.
+
+### 🛠 Internal
+
+- `agent.rs` dispatch block: refactored the `Vec<Handle>` type into
+  `ToolOutcome` + `Handle<'_>` aliases so the panic sidecar reads
+  cleanly and clippy's `type_complexity` lint stays quiet on the
+  new code.
+- `agnt-tools/src/http.rs` shim kept with `#[deprecated]` so
+  external callers compiling against v0.3 don't break on the
+  v0.3.1 upgrade.
+- Bumped all seven crates to `0.3.1`, bumped path-dep constraints
+  in lockstep.
+
 ## [0.3.0] — 2026-04-12
 
 Ergonomics + extensibility release. No new Critical-severity findings; v0.3

@@ -35,14 +35,35 @@
 //! * A doc comment is strongly recommended — it becomes the tool description
 //!   the model sees. If absent, the function name is used as a fallback.
 //!
-//! ### Known limitations (v0.3)
+//! ### ⚠️ Known limitations (v0.3.x)
 //!
-//! * `schema()` returns a placeholder `{"type": "object"}` object. Real JSON
-//!   Schema derivation (via `schemars` or similar) is deferred to v0.4, where
-//!   it will be opt-in via `#[tool(schema = schemars)]`.
+//! **`schema()` is a placeholder — the model sees no field information.**
+//! The generated `TypedTool::schema` returns the literal value
+//! `{"type": "object"}` with no `properties`, no `required`, no field
+//! types. Consequences:
+//!
+//! * The model cannot see what arguments your tool accepts, so it will
+//!   guess field names from the description alone.
+//! * A wrong guess produces a `serde_json` deserialization error that is
+//!   surfaced as the tool result; the model then has to re-plan from the
+//!   error message.
+//! * For any non-trivial tool, the macro currently *reduces* ergonomics
+//!   versus hand-writing a [`TypedTool`] impl where you control
+//!   `schema()` and can emit a real JSON Schema.
+//!
+//! This will be fixed in v0.4 behind an opt-in `#[tool(schema = schemars)]`
+//! attribute that wires the annotated `Args` type through `schemars` to
+//! produce a real JSON Schema. Until then, prefer a hand-written
+//! `TypedTool` impl for any tool whose arguments are non-obvious from the
+//! description alone.
+//!
+//! ### Other limitations
+//!
 //! * Only free functions are supported; methods and closures are not.
 //! * The function is left in place unchanged, so you can still call it
 //!   directly. The generated struct's `TypedTool::call` simply forwards.
+//!
+//! [`TypedTool`]: ../agnt_core/tool/trait.TypedTool.html
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -54,7 +75,11 @@ use syn::{
 
 /// Generate a [`TypedTool`] impl from a free function.
 ///
-/// See the [crate-level docs](crate) for usage and limitations.
+/// ⚠️ **v0.3.x limitation**: the generated `schema()` returns a bare
+/// `{"type": "object"}` with no field metadata. The model cannot see
+/// your argument names or types from the schema alone and must infer
+/// them from the description. See the [crate-level docs](crate) for
+/// the full list of limitations and the v0.4 plan.
 #[proc_macro_attribute]
 pub fn tool(_args: TokenStream, input: TokenStream) -> TokenStream {
     let func = parse_macro_input!(input as ItemFn);

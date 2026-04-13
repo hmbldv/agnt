@@ -1,6 +1,6 @@
 # agnt
 
-**The smallest Rust agent runtime that's auditable as a single binary, structurally sandboxed against adversarial LLM output, and composable across async and sync callers without forcing a runtime choice on either.**
+**A dense, sync-first Rust agent runtime — module-level auditable, structurally sandboxed against adversarial LLM output, and composable across async and sync callers without forcing a runtime choice on either.**
 
 [![Crates.io](https://img.shields.io/crates/v/agnt.svg)](https://crates.io/crates/agnt)
 [![Documentation](https://docs.rs/agnt/badge.svg)](https://docs.rs/agnt)
@@ -11,7 +11,13 @@
 agnt = "0.3"
 ```
 
-## Repository layout (v0.3 — multi-crate workspace)
+## Repository layout (v0.3.1 — seven-crate workspace)
+
+Around 6,200 LOC across seven published library crates plus a REPL
+binary and a fuzz workspace. Each security-critical path lives in a
+single small file (agent loop 947 LOC, tools 1,196 LOC, MCP framing
+~750 LOC, SSRF resolver ~250 LOC) so reviewers can read one layer at
+a time without holding the whole runtime in their head.
 
 | Path | Crate | Purpose |
 |---|---|---|
@@ -68,10 +74,12 @@ tool latency breakdowns from the SQLite log.
 - **[Library README](crates/agnt/README.md)** — Full feature matrix, typed
   tools, observer hooks, benchmarks, and comparison against rig-core,
   llm, langchain-rust.
-- **[Threat model](THREAT_MODEL.md)** — What the v0.2 security model
-  defends against, what's partially mitigated, and what's out of scope.
-- **[Changelog](CHANGELOG.md)** — v0.1 → v0.2 migration notes, every
-  breaking change, and the full list of security and performance fixes.
+- **[Threat model](THREAT_MODEL.md)** — Current security posture: what
+  the sandbox, SSRF resolver, and opt-in Shell defend against, what's
+  partially mitigated, and what's out of scope.
+- **[Changelog](CHANGELOG.md)** — v0.1 → v0.2 → v0.3 → v0.3.1 notes,
+  every breaking change, and the full list of security and performance
+  fixes.
 
 ## License
 

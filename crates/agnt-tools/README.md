@@ -46,16 +46,22 @@ into a larger agent framework of your own.
 ## Security
 
 The entire security story of `agnt-tools` lives in the
-[v0.2 threat model](https://github.com/hmbldv/agnt/blob/main/THREAT_MODEL.md).
+[threat model](https://github.com/hmbldv/agnt/blob/main/THREAT_MODEL.md).
 Summary:
 
 - Filesystem tools use `FilesystemRoot` for symlink-aware containment
   checks. Without a sandbox the tool is explicitly documented as full-host.
 - `Fetch` blocks loopback / private / link-local / AWS IMDS / GCP metadata
-  (IPv4 and IPv6) and disables HTTP redirects on its shared ureq agent.
+  (IPv4 and IPv6) *atomically* with DNS resolution via the custom
+  [`ssrf::SsrfResolver`] installed on a per-instance `ureq::Agent`.
+  v0.3.1 closed the two-phase TOCTOU that v0.2/v0.3 had — ureq no longer
+  performs a second DNS lookup after validation. Redirects are disabled.
 - `EditFile` is race-free via an exclusive sidecar lockfile.
 - `Shell` has no unsafe constructor — the caller must explicitly opt in
-  to both the cargo feature AND provide an argv allowlist.
+  to both the cargo feature AND provide an argv allowlist. On Linux the
+  `bwrap-shell` feature adds a bubblewrap namespace wrapper on top.
+
+[`ssrf::SsrfResolver`]: https://docs.rs/agnt-tools/latest/agnt_tools/ssrf/struct.SsrfResolver.html
 
 ## License
 

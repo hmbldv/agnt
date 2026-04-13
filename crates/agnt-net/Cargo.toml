@@ -1,6 +1,6 @@
 [package]
 name = "agnt-net"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.75"
 authors = ["doop"]
@@ -16,6 +16,13 @@ categories = ["api-bindings"]
 [lib]
 name = "agnt_net"
 path = "src/lib.rs"
+
+[features]
+default = []
+# Opt-in hook exposing stream parsers as #[doc(hidden)] `pub` functions
+# so libfuzzer targets in fuzz/ can exercise them. Not a stable API —
+# the exposed symbols may change in any release.
+fuzz-api = []
 
 [dependencies]
 agnt-core = { version = "0.3", path = "../agnt-core" }

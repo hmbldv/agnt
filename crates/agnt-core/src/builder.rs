@@ -40,6 +40,7 @@ pub struct AgentBuilder<B: LlmBackend> {
     session: Option<String>,
     observer: Option<Arc<dyn Observer>>,
     on_token: Option<Box<dyn FnMut(&str) + Send>>,
+    max_step_duration: Option<std::time::Duration>,
 }
 
 impl<B: LlmBackend> AgentBuilder<B> {
@@ -57,6 +58,7 @@ impl<B: LlmBackend> AgentBuilder<B> {
             session: None,
             observer: None,
             on_token: None,
+            max_step_duration: None,
         }
     }
 
@@ -116,6 +118,15 @@ impl<B: LlmBackend> AgentBuilder<B> {
         self
     }
 
+    /// Set a wall-clock deadline for a single [`Agent::step`] call.
+    ///
+    /// See [`Agent::max_step_duration`] for the enforcement semantics.
+    /// Unset (the default) preserves the unbounded v0.3 behavior.
+    pub fn max_step_duration(mut self, d: std::time::Duration) -> Self {
+        self.max_step_duration = Some(d);
+        self
+    }
+
     /// Finalize the builder and produce an [`Agent`].
     ///
     /// If a store was provided, this calls [`Agent::attach_store`]. Any error
@@ -140,6 +151,7 @@ impl<B: LlmBackend> AgentBuilder<B> {
             agent.observer = Arc::new(NoOpObserver);
         }
         agent.on_token = self.on_token;
+        agent.max_step_duration = self.max_step_duration;
         if let Some(store) = self.store {
             let session = self.session.unwrap_or_else(|| "default".into());
             agent.attach_store(store, &session)?;

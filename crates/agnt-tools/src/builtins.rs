@@ -100,6 +100,21 @@ impl Tool for ReadFile {
 ///
 /// **Unsandboxed by default.** Use [`EditFile::with_sandbox`] when exposed to
 /// hostile LLM output.
+///
+/// ## Lockfile name is predictable
+///
+/// The sidecar lock lives at `.<filename>.agnt-edit.lock` in the same
+/// directory as the target. The name is deterministic by design — it
+/// has to be, so two agnt processes editing the same file on the same
+/// host coordinate correctly. The tradeoff is that a *different* local
+/// process on the same machine can pre-create the lockfile and hold
+/// the exclusive lock, causing every `EditFile` call on that target
+/// to block or fail. That is a local-user DoS, not a sandbox escape:
+/// it requires write access to the target's parent directory, which
+/// is already out of the agent's threat model (v0.2 Threat Model §
+/// "local untrusted users"). If you need multi-tenant isolation, put
+/// each agent in its own bwrap/container/landlock view — the lockfile
+/// pattern is designed for the single-tenant case.
 pub struct EditFile {
     sandbox: Option<Arc<FilesystemRoot>>,
 }
@@ -757,16 +772,31 @@ impl Tool for Grep {
 // Fetch — SSRF guarded (S3)
 // ------------------------------------------------------------------------------------------------
 
-/// HTTP GET a URL with an SSRF guard.
+/// HTTP GET a URL with an atomic SSRF guard.
 ///
-/// Rejects non-http(s) schemes, rejects URLs whose DNS resolution returns
-/// any IP in the loopback / private / link-local / unspecified / multicast
-/// ranges, and explicitly blocklists the cloud metadata endpoints. Redirects
-/// are disabled on the underlying ureq agent so attackers cannot bypass the
-/// resolved-IP check via `302 Location: http://169.254.169.254/…`.
+/// v0.3.1 closes the v0.2/v0.3 two-phase TOCTOU by installing a custom
+/// [`ureq::Resolver`] ([`crate::ssrf::SsrfResolver`]) on the underlying
+/// agent. ureq calls the resolver exactly once per connection, uses the
+/// exact addresses it returns, and never performs a second DNS lookup.
+/// That removes the DNS-rebinding window a short-TTL authority could
+/// previously use to flip a public check-time IP to a private
+/// request-time IP.
+///
+/// Each `Fetch` instance lazily builds its own `ureq::Agent` on first
+/// call, so a per-instance `allow_hosts` allowlist composes cleanly.
+/// Redirects are disabled (`redirects(0)`) so a `302 Location:` hop
+/// cannot bypass the resolver.
+///
+/// URL-shape validation (scheme allowlist, parsing) still happens
+/// up-front in `Fetch::call` because the resolver only sees the
+/// `host:port` netloc, not the scheme.
 pub struct Fetch {
     allow_hosts: Option<Vec<String>>,
     max_bytes: usize,
+    // Lazily initialised so the tool is cheap to construct and so the
+    // agent's resolver captures the final allow_hosts configured via the
+    // builder-style setters.
+    agent: std::sync::OnceLock<ureq::Agent>,
 }
 
 const FETCH_DEFAULT_MAX: usize = 64 * 1024;
@@ -777,12 +807,17 @@ impl Default for Fetch {
 
 impl Fetch {
     pub fn new() -> Self {
-        Self { allow_hosts: None, max_bytes: FETCH_DEFAULT_MAX }
+        Self {
+            allow_hosts: None,
+            max_bytes: FETCH_DEFAULT_MAX,
+            agent: std::sync::OnceLock::new(),
+        }
     }
 
-    /// Restrict fetches to an explicit host allowlist. When set, any URL
-    /// whose host (case-insensitive) is not in the list is rejected before
-    /// DNS resolution.
+    /// Restrict fetches to an explicit host allowlist. Case-insensitive.
+    ///
+    /// The allowlist is enforced inside the custom resolver before any
+    /// DNS query is issued, so a rejected host never triggers a lookup.
     pub fn with_allow_hosts(mut self, hosts: Vec<String>) -> Self {
         self.allow_hosts = Some(hosts.into_iter().map(|h| h.to_lowercase()).collect());
         self
@@ -793,68 +828,40 @@ impl Fetch {
         self.max_bytes = n;
         self
     }
+
+    /// Build the ureq agent for this Fetch instance. Installs
+    /// [`SsrfResolver`] so DNS resolution is atomic with validation.
+    ///
+    /// [`SsrfResolver`]: crate::ssrf::SsrfResolver
+    fn agent(&self) -> &ureq::Agent {
+        self.agent.get_or_init(|| {
+            let resolver = match &self.allow_hosts {
+                Some(list) => crate::ssrf::SsrfResolver::with_allow_hosts(list.clone()),
+                None => crate::ssrf::SsrfResolver::new(),
+            };
+            let builder = ureq::AgentBuilder::new()
+                .resolver(resolver)
+                .redirects(0);
+            match native_tls::TlsConnector::new() {
+                Ok(connector) => builder.tls_connector(Arc::new(connector)).build(),
+                Err(_) => builder.build(),
+            }
+        })
+    }
 }
 
-fn ssrf_check(url: &str, allow_hosts: &Option<Vec<String>>) -> Result<(), String> {
-    use std::net::ToSocketAddrs;
-
+/// Upfront URL-shape validation. The atomic IP / host check lives in
+/// [`crate::ssrf::SsrfResolver`]; this function only catches things the
+/// resolver cannot see from a netloc alone — primarily the scheme and
+/// malformed URLs.
+fn fetch_url_shape_check(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("url parse: {}", e))?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return Err(format!("rejected scheme: {}", scheme));
     }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "url has no host".to_string())?
-        .to_lowercase();
-
-    // Explicit metadata blocklist (covers the name-based GCP endpoint that
-    // would otherwise resolve to a non-private IP that happens to be routable
-    // only from inside the VM).
-    if host == "metadata.google.internal" || host == "169.254.169.254" {
-        return Err(format!("rejected metadata host: {}", host));
-    }
-
-    if let Some(allow) = allow_hosts {
-        if !allow.iter().any(|h| h == &host) {
-            return Err(format!("host {} not in allowlist", host));
-        }
-    }
-
-    let port = parsed.port_or_known_default().unwrap_or(80);
-    let addrs = (host.as_str(), port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {}: {}", host, e))?;
-
-    let mut any = false;
-    for sa in addrs {
-        any = true;
-        let ip = sa.ip();
-        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-            return Err(format!("rejected IP {} for {}", ip, host));
-        }
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                if v4.is_private() || v4.is_link_local() || v4.is_broadcast() {
-                    return Err(format!("rejected IPv4 {} for {}", v4, host));
-                }
-                // 169.254.169.254 is already is_link_local; explicit belt-and-suspenders:
-                if v4.octets() == [169, 254, 169, 254] {
-                    return Err(format!("rejected AWS metadata IP for {}", host));
-                }
-            }
-            std::net::IpAddr::V6(v6) => {
-                // No stable is_private / is_unique_local on stable std yet.
-                // Reject ULA (fc00::/7) and link-local (fe80::/10) by prefix.
-                let seg0 = v6.segments()[0];
-                if (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfe80 {
-                    return Err(format!("rejected IPv6 {} for {}", v6, host));
-                }
-            }
-        }
-    }
-    if !any {
-        return Err(format!("no addresses for {}", host));
+    if parsed.host_str().is_none() {
+        return Err("url has no host".to_string());
     }
     Ok(())
 }
@@ -862,7 +869,7 @@ fn ssrf_check(url: &str, allow_hosts: &Option<Vec<String>>) -> Result<(), String
 impl Tool for Fetch {
     fn name(&self) -> &str { "fetch" }
     fn description(&self) -> &str {
-        "HTTP GET a URL and return the response body (first 64KB by default). Rejects loopback / private / link-local / metadata hosts."
+        "HTTP GET a URL and return the response body (first 64KB by default). Rejects loopback / private / link-local / metadata hosts atomically via a custom DNS resolver."
     }
     fn schema(&self) -> Value {
         json!({
@@ -876,8 +883,9 @@ impl Tool for Fetch {
     fn call(&self, args: Value) -> Result<String, String> {
         use std::io::Read;
         let url = args["url"].as_str().ok_or("missing url")?;
-        ssrf_check(url, &self.allow_hosts)?;
-        let resp = crate::http::agent()
+        fetch_url_shape_check(url)?;
+        let resp = self
+            .agent()
             .get(url)
             .call()
             .map_err(|e| format!("fetch: {}", e))?;
@@ -1033,6 +1041,39 @@ mod tests {
         let tool2 = Fetch::new().with_allow_hosts(vec!["example.com".into()]);
         let err2 = tool2.call(json!({"url":"http://not-on-list.invalid/"})).unwrap_err();
         assert!(err2.contains("allowlist") || err2.contains("not-on-list"));
+    }
+
+    #[test]
+    fn fetch_uses_ssrf_resolver_atomically() {
+        // v0.3.1: ureq's custom Resolver is the ONLY DNS path the agent
+        // uses. This test verifies the wired-up agent rejects a private
+        // IP via the resolver (not the old pre-check) by ensuring the
+        // returned error carries the resolver's message.
+        //
+        // 10.0.0.1 isn't actually resolved by the system; we use a raw
+        // IP so ToSocketAddrs skips DNS and hits validate_addrs directly,
+        // proving the resolver is on the code path.
+        let tool = Fetch::new();
+        let err = tool.call(json!({"url":"http://10.0.0.1/"})).unwrap_err();
+        assert!(
+            err.contains("IPv4") || err.contains("10.0.0.1") || err.contains("private"),
+            "error should come from SsrfResolver: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fetch_ipv6_literal_loopback_rejected() {
+        let tool = Fetch::new();
+        let err = tool.call(json!({"url":"http://[::1]/"})).unwrap_err();
+        assert!(err.contains("loopback") || err.contains("::1"), "got: {}", err);
+    }
+
+    #[test]
+    fn fetch_ipv6_literal_ula_rejected() {
+        let tool = Fetch::new();
+        let err = tool.call(json!({"url":"http://[fc00::1]/"})).unwrap_err();
+        assert!(err.contains("IPv6") || err.contains("fc00"), "got: {}", err);
     }
 
     // ---- S6: EditFile atomicity ----------------------------------------------------------

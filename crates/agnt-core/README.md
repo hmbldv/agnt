@@ -45,7 +45,7 @@ Depend directly on `agnt-core` when:
 
 ## Security
 
-See the [v0.2 threat model](https://github.com/hmbldv/agnt/blob/main/THREAT_MODEL.md).
+See the [threat model](https://github.com/hmbldv/agnt/blob/main/THREAT_MODEL.md).
 `agnt-core` handles tool output envelope framing (`<tool_output>`) and
 enforces the 64KB per-result byte cap. Filesystem sandboxing and SSRF
 guards live in `agnt-tools`.
