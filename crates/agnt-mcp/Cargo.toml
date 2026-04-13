@@ -10,7 +10,7 @@ homepage = "https://github.com/hmbldv/agnt"
 documentation = "https://docs.rs/agnt-mcp"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
-keywords = ["agent", "llm", "mcp", "model-context-protocol"]
+keywords = ["agent", "llm", "mcp", "anthropic", "tool"]
 categories = ["api-bindings"]
 
 [lib]
