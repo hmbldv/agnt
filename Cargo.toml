@@ -7,6 +7,7 @@ members = [
     "crates/agnt-macros",
     "crates/agnt-mcp",
     "crates/agnt",
+    "crates/agnt-dmn",
     ".",
 ]
 
