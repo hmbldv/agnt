@@ -22,6 +22,7 @@ pub struct EngineResult {
 #[derive(Debug)]
 struct EngineState {
     budget_allocated: u64,
+    credits_per_step: u64,
     credits: Arc<AtomicU64>,
     tasks_completed: u32,
     tasks_failed: u32,
@@ -30,9 +31,10 @@ struct EngineState {
 }
 
 impl EngineState {
-    fn new(budget_allocated: u64, credits: Arc<AtomicU64>) -> Self {
+    fn new(budget_allocated: u64, credits_per_step: u64, credits: Arc<AtomicU64>) -> Self {
         Self {
             budget_allocated,
+            credits_per_step,
             credits,
             tasks_completed: 0,
             tasks_failed: 0,
@@ -71,6 +73,9 @@ pub struct EngineConfig<B: LlmBackend> {
     pub tools: Vec<Box<dyn Tool>>,
     pub system_prompt: String,
     pub max_steps: usize,
+    /// Flat credits charged per inference step. Real token metering
+    /// requires agnt-net to expose usage from HTTP responses.
+    pub credits_per_step: u64,
     pub budget_allocated: u64,
     pub ttl_expires_at: chrono::DateTime<chrono::Utc>,
     pub shutdown: Arc<Notify>,
@@ -136,7 +141,7 @@ impl AgentEngine {
             }
         };
 
-        let mut state = EngineState::new(config.budget_allocated, credits);
+        let mut state = EngineState::new(config.budget_allocated, config.credits_per_step, credits);
         let shutdown = config.shutdown;
         let ttl = config.ttl_expires_at;
 
@@ -285,8 +290,9 @@ async fn execute_task<B: LlmBackend + 'static>(
         match step_result {
             Ok(output) => {
                 info!(attempt, output_len = output.len(), "step succeeded");
-                // Add inference credits (flat cost per step for now).
-                state.credits.fetch_add(100, Ordering::Relaxed);
+                // Add inference credits (flat cost per step — real token
+                // metering needs agnt-net to expose usage from responses).
+                state.credits.fetch_add(state.credits_per_step, Ordering::Relaxed);
                 return StepResult::Success(output);
             }
             Err(error) => {
