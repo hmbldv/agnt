@@ -275,24 +275,12 @@ async fn execute_task<B: LlmBackend + 'static>(
         let instructions = payload.instructions.clone();
         let timeout_secs = task.terminal.attempt_timeout_secs;
 
-        let step_result = tokio::select! {
-            _ = shutdown.notified() => {
-                return StepResult::Failed(TerminalReason::Aborted);
-            }
-            result = tokio::time::timeout(
-                Duration::from_secs(timeout_secs),
-                // Agent::step is sync — run it on the blocking pool.
-                // Since Agent is not Send (contains non-Send fields potentially),
-                // we call step directly. In practice the engine should own the
-                // agent on a dedicated thread if needed.
-                async { agent.step(&instructions) }
-            ) => {
-                match result {
-                    Ok(r) => r,
-                    Err(_) => Err("attempt timed out".to_string()),
-                }
-            }
-        };
+        // Agent::step() is sync and uses blocking HTTP (ureq).
+        // block_in_place tells tokio this will block, allowing it to
+        // schedule other tasks on other workers.
+        let step_result = tokio::task::block_in_place(|| {
+            agent.step(&instructions)
+        });
 
         match step_result {
             Ok(output) => {
