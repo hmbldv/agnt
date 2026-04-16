@@ -127,3 +127,11 @@ pub use agnt_macros::tool;
 pub mod mcp {
     pub use agnt_mcp::*;
 }
+
+// Async execution runtime. Wraps agnt-core's sync Agent<B> with retry,
+// recovery cascade, budget tracking, and execution modes (OneShot, Loop,
+// UntilSuccess, Pipeline). Requires tokio.
+#[cfg(feature = "engine")]
+pub mod engine {
+    pub use agnt_engine::*;
+}

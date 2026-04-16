@@ -1,0 +1,16 @@
+[package]
+name = "agnt-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Async execution runtime wrapping agnt-core with retry, recovery, budget, and session contracts"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+agnt-core = { path = "../agnt-core" }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+rand = "0.8"
