@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(handlers::health::<Backend>))
         .route("/step", post(handlers::step::<Backend>))
+        .route("/step/stream", post(handlers::step_stream::<Backend>))
         .route("/tool", post(handlers::tool::<Backend>))
         .route("/sessions", get(handlers::sessions::<Backend>))
         .route("/tools", get(handlers::tools::<Backend>));

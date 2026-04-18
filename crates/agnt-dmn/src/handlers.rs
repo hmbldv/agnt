@@ -1,13 +1,18 @@
 //! HTTP request handlers.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::StreamExt as _;
 
-use agnt_core::LlmBackend;
+use agnt_core::{LlmBackend, Message, Observer, ToolCall, ToolResult};
 use crate::state::DmnState;
 
 // --- Health & Status ---
@@ -81,6 +86,115 @@ pub async fn step<B: LlmBackend + Clone + 'static>(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task join: {}", e)))?;
 
     result.map(Json).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+// --- SSE streaming step ---
+
+struct SseItem {
+    event: &'static str,
+    json: String,
+}
+
+struct SseObserver {
+    tx: mpsc::UnboundedSender<SseItem>,
+    session_id: String,
+}
+
+impl Observer for SseObserver {
+    fn on_tool_start(&self, call: &ToolCall) {
+        let data = serde_json::json!({
+            "name": call.function.name,
+            "args": call.function.arguments,
+        });
+        let _ = self.tx.send(SseItem { event: "tool_call", json: data.to_string() });
+    }
+
+    fn on_tool_end(&self, call: &ToolCall, result: &ToolResult) {
+        let result_str = match &result.output {
+            Ok(s) => s.as_str(),
+            Err(s) => s.as_str(),
+        };
+        const RESULT_CAP: usize = 2048;
+        let display = if result_str.len() > RESULT_CAP {
+            // Truncate on a valid UTF-8 boundary
+            let mut end = RESULT_CAP;
+            while end > 0 && !result_str.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}… [{} bytes truncated]", &result_str[..end], result_str.len() - end)
+        } else {
+            result_str.to_string()
+        };
+        let data = serde_json::json!({
+            "name": call.function.name,
+            "result": display,
+            "duration_ms": result.duration_us as f64 / 1000.0,
+        });
+        let _ = self.tx.send(SseItem { event: "tool_result", json: data.to_string() });
+    }
+
+    fn on_step_end(&self, response: &Message) {
+        let data = serde_json::json!({
+            "session_id": self.session_id,
+            "response": response.content.as_deref().unwrap_or(""),
+        });
+        let _ = self.tx.send(SseItem { event: "complete", json: data.to_string() });
+    }
+
+    fn on_step_error(&self, error: &str) {
+        let data = serde_json::json!({ "message": error });
+        let _ = self.tx.send(SseItem { event: "error", json: data.to_string() });
+    }
+}
+
+pub async fn step_stream<B: LlmBackend + Clone + 'static>(
+    State(state): State<Arc<DmnState<B>>>,
+    Json(req): Json<StepRequest>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let session = state.get_or_create_session(&req.session_id);
+    let (tx, rx) = mpsc::unbounded_channel::<SseItem>();
+
+    let _ = tx.send(SseItem {
+        event: "session_start",
+        json: serde_json::json!({
+            "session_id": session,
+            "model": state.config.model,
+        })
+        .to_string(),
+    });
+
+    // Two senders: one for the observer, one for the on_token callback.
+    // Both are dropped when the blocking task exits, which closes the channel.
+    let tx_obs = tx.clone();
+    let tx_tok = tx.clone();
+    drop(tx);
+
+    let observer = Arc::new(SseObserver {
+        tx: tx_obs,
+        session_id: session.clone(),
+    });
+
+    let state_clone = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut agent = state_clone.agent_factory.create(&session, req.system_prompt.as_deref());
+        agent.observer = observer as Arc<dyn agnt_core::Observer>;
+        agent.on_token = Some(Box::new(move |tok| {
+            let data = serde_json::json!({ "content": tok });
+            let _ = tx_tok.send(SseItem { event: "token", json: data.to_string() });
+        }));
+        let _ = agent.step(&req.prompt);
+        // agent drops here → observer (tx_obs) and on_token (tx_tok) drop → channel closes
+    });
+
+    let stream = UnboundedReceiverStream::new(rx).map(|item| {
+        Ok::<Event, Infallible>(Event::default().event(item.event).data(item.json))
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 // --- Tool dispatch (direct, no inference) ---
