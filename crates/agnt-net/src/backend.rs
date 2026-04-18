@@ -158,7 +158,7 @@ impl Backend {
         sink: Option<&mut dyn FnMut(&str)>,
     ) -> Result<Message, String> {
         let url = format!("{}/chat/completions", self.base_url);
-        let mut body = json!({ "model": self.model, "messages": messages });
+        let mut body = json!({ "model": self.model, "messages": to_openai_messages(messages) });
         if let Some(arr) = tools.as_array() {
             if !arr.is_empty() {
                 body["tools"] = tools.clone();
@@ -361,6 +361,26 @@ where
     Err(redact_secrets(
         last_err.as_deref().unwrap_or("with_retry: exhausted"),
     ))
+}
+
+/// Serialize messages for the OpenAI-compatible wire format.
+///
+/// Ollama rejects assistant messages whose `content` field is absent or null —
+/// it requires the field to be a string even when the response contains only
+/// tool_calls. Same constraint applies to `tool` role messages whose result
+/// content may be absent.
+fn to_openai_messages(msgs: &[Message]) -> Vec<Value> {
+    msgs.iter()
+        .map(|m| {
+            let mut obj = serde_json::to_value(m).unwrap_or(json!({}));
+            if (m.role == "assistant" || m.role == "tool")
+                && (obj.get("content").is_none() || obj["content"].is_null())
+            {
+                obj["content"] = json!("");
+            }
+            obj
+        })
+        .collect()
 }
 
 fn to_anthropic_messages(msgs: &[Message]) -> (String, Vec<Value>) {
@@ -809,6 +829,47 @@ mod tests {
         assert_eq!(tcs[0].id, "call_1");
         assert_eq!(tcs[0].function.name, "f");
         assert_eq!(tcs[0].function.arguments, "{\"x\":1}");
+    }
+
+    #[test]
+    fn to_openai_messages_content_never_null_for_assistant() {
+        let msgs = vec![
+            Message {
+                role: "user".into(),
+                content: Some("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: "list_dir".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: "tool".into(),
+                content: None,
+                tool_calls: None,
+                tool_call_id: Some("call_1".into()),
+                name: None,
+            },
+        ];
+        let out = to_openai_messages(&msgs);
+        // user message: content should be present as-is
+        assert_eq!(out[0]["content"], json!("hi"));
+        // assistant with tool_calls, no text: content must be "" not null/missing
+        assert_eq!(out[1]["content"], json!(""), "assistant content must be empty string, not null");
+        // tool message with no content: must be "" not null/missing
+        assert_eq!(out[2]["content"], json!(""), "tool content must be empty string, not null");
     }
 
     #[test]
