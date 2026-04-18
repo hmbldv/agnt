@@ -38,7 +38,8 @@ impl<B: LlmBackend + Clone + 'static> AgentFactory<B> {
     pub fn create(&self, session_id: &str, system_prompt: Option<&str>) -> Agent<B> {
         let prompt = system_prompt.unwrap_or("You are a helpful assistant.");
         let mut builder = AgentBuilder::new(self.backend.clone())
-            .system(prompt);
+            .system(prompt)
+            .tools(self.registry.make_proxies());
 
         // Attach store if configured
         if let Some(ref path) = self.store_path {

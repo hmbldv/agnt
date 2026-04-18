@@ -191,6 +191,53 @@ impl Default for Registry {
     }
 }
 
+/// A lightweight proxy that forwards [`Tool`] calls to a shared [`Registry`].
+///
+/// Created by [`Registry::make_proxies`] so an `Arc<Registry>` can supply
+/// tools to an [`Agent`] without requiring `Tool: Clone`.
+struct RegistryProxy {
+    registry: std::sync::Arc<Registry>,
+    name: String,
+    description: String,
+    schema: Value,
+}
+
+impl Tool for RegistryProxy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn schema(&self) -> Value {
+        self.schema.clone()
+    }
+    fn call(&self, args: Value) -> Result<String, String> {
+        self.registry.dispatch(&self.name, args)
+    }
+}
+
+impl Registry {
+    /// Return a `Vec` of proxy [`Tool`] objects that forward calls to the tools
+    /// held in this `Arc<Registry>`.
+    ///
+    /// Use this to wire a shared registry into an [`Agent`]'s own tool
+    /// registry without requiring `Tool: Clone`.
+    pub fn make_proxies(self: &std::sync::Arc<Self>) -> Vec<Box<dyn Tool>> {
+        self.tools
+            .iter()
+            .map(|t| {
+                Box::new(RegistryProxy {
+                    registry: std::sync::Arc::clone(self),
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    schema: t.schema(),
+                }) as Box<dyn Tool>
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
