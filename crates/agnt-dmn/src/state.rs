@@ -52,7 +52,7 @@ impl<B: LlmBackend + Clone + 'static> AgentFactory<B> {
 }
 
 impl<B: LlmBackend> DmnState<B> {
-    pub fn get_or_create_session(&self, session_id: &str) -> SessionInfo {
+    pub fn get_or_create_session(&self, session_id: &str) -> String {
         let mut sessions = self.sessions.lock().unwrap();
         let now = Utc::now();
         sessions
@@ -66,7 +66,7 @@ impl<B: LlmBackend> DmnState<B> {
                 created_at: now,
                 last_activity: now,
                 request_count: 1,
-            })
-            .clone()
+            });
+        session_id.to_string()
     }
 }

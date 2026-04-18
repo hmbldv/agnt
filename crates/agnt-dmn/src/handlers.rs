@@ -65,13 +65,13 @@ pub async fn step<B: LlmBackend + Clone + 'static>(
     let state_clone = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut agent = state_clone.agent_factory.create(
-            &session.id,
+            &session,
             req.system_prompt.as_deref(),
         );
 
         match agent.step(&req.prompt) {
             Ok(response) => Ok(StepResponse {
-                session_id: session.id,
+                session_id: session,
                 response,
             }),
             Err(e) => Err(format!("agent step failed: {}", e)),

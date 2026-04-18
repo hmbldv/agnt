@@ -379,7 +379,7 @@ impl<B: LlmBackend> Agent<B> {
             )
             .entered();
 
-            let resp = if use_on_token {
+            let mut resp = if use_on_token {
                 // Temporarily move the callback out so we can borrow the
                 // backend and self.messages at the same time.
                 let mut cb = self.on_token.take().expect("on_token is_some");
@@ -423,21 +423,12 @@ impl<B: LlmBackend> Agent<B> {
             };
             drop(_backend_span);
 
-            // P1: no resp.clone(). Push, then reach back into
-            // self.messages for the pushed entry by index.
+            // Extract tool_calls before push to avoid cloning the Vec<ToolCall>.
+            let calls = resp.tool_calls.take();
+            let has_calls = calls.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
             self.persist(&resp);
             let resp_idx = self.messages.len();
             self.messages.push(resp);
-
-            // Borrow the just-pushed response for the no-tool-calls branch
-            // and extract tool_calls by cloning only the Vec<ToolCall> when
-            // we actually need it (at most a few entries, not the full
-            // message body).
-            let has_calls = self.messages[resp_idx]
-                .tool_calls
-                .as_ref()
-                .map(|c| !c.is_empty())
-                .unwrap_or(false);
 
             if !has_calls {
                 let out = self.messages[resp_idx]
@@ -455,12 +446,7 @@ impl<B: LlmBackend> Agent<B> {
                 return Ok(out);
             }
 
-            // Only clone the (small) list of tool calls.
-            let calls = self.messages[resp_idx]
-                .tool_calls
-                .as_ref()
-                .expect("has_calls checked above")
-                .clone();
+            let calls = calls.expect("has_calls checked above");
 
             if let Err(e) = deadline_check("pre_dispatch") {
                 self.observer.on_step_error(&e);
@@ -552,20 +538,20 @@ impl<B: LlmBackend> Agent<B> {
                     // blew up. v0.3.1 threads the sidecar through.
                     type Handle<'s> = (
                         std::thread::ScopedJoinHandle<'s, ToolOutcome>,
-                        String,
-                        String,
-                        String,
+                        Arc<str>,
+                        Arc<str>,
+                        Arc<str>,
                     );
                     let handles: Vec<Handle<'_>> = calls
                         .iter()
                         .zip(decisions.into_iter())
                         .map(|(call, decision)| {
-                            let name = call.function.name.clone();
-                            let id = call.id.clone();
-                            let args_str = call.function.arguments.clone();
-                            let sidecar_id = id.clone();
-                            let sidecar_name = name.clone();
-                            let sidecar_args = args_str.clone();
+                            let name: Arc<str> = Arc::from(call.function.name.as_str());
+                            let id: Arc<str> = Arc::from(call.id.as_str());
+                            let args_str: Arc<str> = Arc::from(call.function.arguments.as_str());
+                            let sidecar_id = Arc::clone(&id);
+                            let sidecar_name = Arc::clone(&name);
+                            let sidecar_args = Arc::clone(&args_str);
                             let observer = observer.clone();
                             let call_clone = call.clone();
                             let handle = s.spawn(move || {
@@ -601,12 +587,12 @@ impl<B: LlmBackend> Agent<B> {
                                 };
 
                                 let tool_result = ToolResult {
-                                    name: name.clone(),
+                                    name: name.to_string(),
                                     output: Ok(result.clone()),
                                     duration_us: dur,
                                 };
                                 observer.on_tool_end(&call_clone, &tool_result);
-                                (id, name, args_str, result, dur)
+                                (id.to_string(), name.to_string(), args_str.to_string(), result, dur)
                             });
                             (handle, sidecar_id, sidecar_name, sidecar_args)
                         })
@@ -623,9 +609,9 @@ impl<B: LlmBackend> Agent<B> {
                                     "tool thread panicked"
                                 );
                                 (
-                                    id,
-                                    name,
-                                    args_str,
+                                    id.to_string(),
+                                    name.to_string(),
+                                    args_str.to_string(),
                                     format!("error: tool thread panicked: {}", msg),
                                     0,
                                 )
@@ -710,7 +696,10 @@ fn panic_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
 /// characters that would break the attribute syntax are replaced; the
 /// envelope body is left untouched because downstream is a model, not a
 /// browser.
-fn escape_attr(s: &str) -> String {
+fn escape_attr(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.bytes().all(|b| b != b'&' && b != b'"' && b != b'<' && b != b'>') {
+        return std::borrow::Cow::Borrowed(s);
+    }
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -721,7 +710,7 @@ fn escape_attr(s: &str) -> String {
             _ => out.push(c),
         }
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(test)]
