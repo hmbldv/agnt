@@ -3,6 +3,6 @@ mod engine;
 mod observer;
 pub mod task;
 
-pub use engine::{AgentEngine, EngineConfig, EngineResult};
+pub use engine::{run_agent, EngineConfig, EngineResult};
 pub use observer::EngineObserver;
 pub use task::*;

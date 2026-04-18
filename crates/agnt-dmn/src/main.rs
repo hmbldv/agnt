@@ -74,7 +74,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/step", post(handlers::step::<Backend>))
         .route("/tool", post(handlers::tool::<Backend>))
         .route("/sessions", get(handlers::sessions::<Backend>))
-        .route("/tools", get(handlers::tools::<Backend>))
+        .route("/tools", get(handlers::tools::<Backend>));
+
+    #[cfg(feature = "engine")]
+    let app = app.route("/engine", post(handlers::run_engine::<Backend>));
+
+    let app = app
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

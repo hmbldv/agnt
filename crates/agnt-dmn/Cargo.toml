@@ -5,8 +5,12 @@ edition = "2021"
 description = "Edge daemon wrapping agnt-core in an HTTP server for multi-machine agent workflows"
 license = "MIT OR Apache-2.0"
 
+[features]
+engine = ["dep:agnt-engine"]
+
 [dependencies]
 agnt-core = { path = "../agnt-core" }
+agnt-engine = { path = "../agnt-engine", optional = true }
 agnt-net = { path = "../agnt-net" }
 agnt-store = { path = "../agnt-store" }
 agnt-tools = { path = "../agnt-tools" }

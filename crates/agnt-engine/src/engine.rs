@@ -85,24 +85,14 @@ pub struct EngineConfig<B: LlmBackend> {
     pub denied_tools: Vec<String>,
 }
 
-/// The agent engine — wraps agnt-core's `Agent<B>` with async retry,
-/// recovery, budget tracking, and execution modes.
+/// Run a task to completion with full retry + recovery.
 ///
-/// Standalone: works without msh-gtwy. Just create an EngineConfig,
-/// a Task, and call `AgentEngine::run()`.
-pub struct AgentEngine;
-
-impl AgentEngine {
-    /// Run a task to completion with full retry + recovery.
-    ///
-    /// This is the main entry point. The engine:
-    /// 1. Creates an agnt-core Agent<B> with an EngineObserver
-    /// 2. Calls agent.step() inside spawn_blocking (sync→async bridge)
-    /// 3. Handles retry, recovery cascade, budget, and execution modes
-    pub async fn run<B: LlmBackend + 'static>(
-        config: EngineConfig<B>,
-        task: Task,
-    ) -> EngineResult {
+/// Creates an agnt-core Agent<B> with an EngineObserver, then handles
+/// retry, recovery cascade, budget, and execution modes.
+pub async fn run_agent<B: LlmBackend + 'static>(
+    config: EngineConfig<B>,
+    task: Task,
+) -> EngineResult {
         let credits = EngineObserver::credits_counter();
         let observer = Arc::new(EngineObserver::new(
             credits.clone(),
@@ -244,7 +234,6 @@ impl AgentEngine {
                 state.into_result(TerminalReason::PipelineCompleted)
             }
         }
-    }
 }
 
 enum StepResult {

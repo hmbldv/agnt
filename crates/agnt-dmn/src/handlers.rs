@@ -135,6 +135,46 @@ pub async fn sessions<B: LlmBackend + Clone + 'static>(
     Json(list)
 }
 
+// --- Engine (optional feature) ---
+
+#[cfg(feature = "engine")]
+#[derive(Deserialize)]
+pub struct EngineRequest {
+    pub task: agnt_engine::Task,
+    pub system_prompt: Option<String>,
+    pub max_steps: Option<usize>,
+    pub credits_per_step: Option<u64>,
+    pub budget_allocated: Option<u64>,
+    pub ttl_seconds: Option<i64>,
+    pub permitted_tools: Option<Vec<String>>,
+    pub denied_tools: Option<Vec<String>>,
+}
+
+#[cfg(feature = "engine")]
+pub async fn run_engine<B: LlmBackend + Clone + 'static>(
+    State(state): State<Arc<DmnState<B>>>,
+    Json(req): Json<EngineRequest>,
+) -> Result<Json<agnt_engine::EngineResult>, (StatusCode, String)> {
+    use agnt_engine::{run_agent, EngineConfig};
+    use tokio::sync::Notify;
+
+    let config = EngineConfig {
+        backend: state.agent_factory.backend.clone(),
+        tools: vec![],
+        system_prompt: req.system_prompt.unwrap_or_else(|| "You are a helpful assistant.".into()),
+        max_steps: req.max_steps.unwrap_or(50),
+        credits_per_step: req.credits_per_step.unwrap_or(1),
+        budget_allocated: req.budget_allocated.unwrap_or(0),
+        ttl_expires_at: chrono::Utc::now() + chrono::TimeDelta::seconds(req.ttl_seconds.unwrap_or(3600)),
+        shutdown: Arc::new(Notify::new()),
+        permitted_tools: req.permitted_tools.unwrap_or_default(),
+        denied_tools: req.denied_tools.unwrap_or_default(),
+    };
+
+    let result = run_agent(config, req.task).await;
+    Ok(Json(result))
+}
+
 // --- Tool listing ---
 
 #[derive(Serialize)]
