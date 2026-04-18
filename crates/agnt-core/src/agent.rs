@@ -27,7 +27,7 @@
 //! the envelope is applied.
 
 use crate::backend_trait::LlmBackend;
-use crate::message::Message;
+use crate::message::{Message, ToolCall};
 use crate::observer::{Disposition, NoOpObserver, Observer, StepContext, ToolResult};
 use crate::store_trait::{MessageStore, ToolLog};
 use crate::tool::Registry;
@@ -81,6 +81,20 @@ struct QuotaUsage {
     calls: u32,
     duration_us: u64,
 }
+
+/// Decides whether a tool call is dispatched or short-circuited with a
+/// synthetic result.
+enum CallDecision {
+    /// Allowed — will be dispatched in the scoped thread pool.
+    Allow,
+    /// Refused — synthetic result, skip actual dispatch.
+    Refused(String),
+}
+
+/// `(call_id, tool_name, args_json, result_body, duration_us)` — the uniform
+/// outcome shape produced by [`Agent::dispatch_calls`] for every tool call,
+/// whether it ran, was refused, or panicked.
+type ToolOutcome = (String, String, String, String, u64);
 
 /// The agent loop.
 pub struct Agent<B: LlmBackend> {
@@ -292,6 +306,239 @@ impl<B: LlmBackend> Agent<B> {
         }
     }
 
+    /// Build the slice of messages to send to the backend this turn.
+    ///
+    /// Returns the full history when it fits in `max_window`, otherwise
+    /// clones the system message plus the tail window aligned to a user
+    /// message boundary so tool_use/tool_result pairs are never split.
+    fn build_send_window(&self) -> Vec<Message> {
+        match self.window_start() {
+            None => self.messages.clone(),
+            Some(start) => self.windowed_truncated(start),
+        }
+    }
+
+    /// Evaluate per-call dispositions (observer policy + quota), then run
+    /// all allowed calls in parallel via `thread::scope`.
+    ///
+    /// Quota call-slot counters in `quota_usage` are incremented before
+    /// dispatch so concurrent calls to the same tool contend correctly.
+    /// Returns one [`ToolOutcome`] per call in the same order as `calls`.
+    fn dispatch_calls(
+        &self,
+        calls: Vec<ToolCall>,
+        quota_usage: &mut HashMap<String, QuotaUsage>,
+    ) -> Vec<ToolOutcome> {
+        // v0.3 C2 + M3: sequentially evaluate each call's disposition
+        // (observer policy check) and quota state BEFORE spawning any
+        // scoped thread. Calls that are refused or over-quota get a
+        // synthetic result and are NOT dispatched.
+        let observer_clone = self.observer.clone();
+        let decisions: Vec<CallDecision> = calls
+            .iter()
+            .map(|call| {
+                // C2: observer policy gate
+                if let Disposition::Refused(msg) = observer_clone.should_dispatch(call) {
+                    warn!(tool = %call.function.name, reason = %msg, "observer refused dispatch");
+                    return CallDecision::Refused(format!("refused by observer: {}", msg));
+                }
+                // M3: per-tool quota check
+                if let Some(quota) = self.tool_quotas.get(&call.function.name) {
+                    let usage = quota_usage
+                        .entry(call.function.name.clone())
+                        .or_default();
+                    if let Some(max) = quota.max_calls {
+                        if usage.calls >= max {
+                            warn!(
+                                tool = %call.function.name,
+                                max = max,
+                                "tool call quota exceeded"
+                            );
+                            return CallDecision::Refused(format!(
+                                "quota exceeded: {} reached max {} calls this step",
+                                call.function.name, max
+                            ));
+                        }
+                    }
+                    if let Some(max_us) = quota.max_duration_us {
+                        if usage.duration_us >= max_us {
+                            warn!(
+                                tool = %call.function.name,
+                                max_us = max_us,
+                                "tool duration quota exceeded"
+                            );
+                            return CallDecision::Refused(format!(
+                                "quota exceeded: {} reached max {}µs wall time this step",
+                                call.function.name, max_us
+                            ));
+                        }
+                    }
+                    // Reserve the call slot before dispatching.
+                    usage.calls += 1;
+                }
+                CallDecision::Allow
+            })
+            .collect();
+
+        let registry = &self.tools;
+        let observer = self.observer.clone();
+        // P1 + S5: run dispatch in scoped threads. If a worker panics
+        // its join error is converted to an error string and surfaced
+        // as the tool result, so the loop continues. Refused calls
+        // (C2/M3) skip the actual dispatch but still fire on_tool_start
+        // / on_tool_end so observers see the full lifecycle.
+        std::thread::scope(|s| {
+            // We carry (id, name, args_str) alongside each handle so
+            // a panicked worker thread keeps its attribution on the
+            // way out.
+            type Handle<'s> = (
+                std::thread::ScopedJoinHandle<'s, ToolOutcome>,
+                Arc<str>,
+                Arc<str>,
+                Arc<str>,
+            );
+            let handles: Vec<Handle<'_>> = calls
+                .iter()
+                .zip(decisions.into_iter())
+                .map(|(call, decision)| {
+                    let name: Arc<str> = Arc::from(call.function.name.as_str());
+                    let id: Arc<str> = Arc::from(call.id.as_str());
+                    let args_str: Arc<str> = Arc::from(call.function.arguments.as_str());
+                    let sidecar_id = Arc::clone(&id);
+                    let sidecar_name = Arc::clone(&name);
+                    let sidecar_args = Arc::clone(&args_str);
+                    let observer = observer.clone();
+                    let call_clone = call.clone();
+                    let handle = s.spawn(move || {
+                        let _tool_span = info_span!(
+                            "agnt.tool",
+                            name = %name,
+                            id = %id,
+                        )
+                        .entered();
+                        observer.on_tool_start(&call_clone);
+
+                        let (result, dur) = match decision {
+                            CallDecision::Refused(msg) => (msg, 0u64),
+                            CallDecision::Allow => {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&args_str)
+                                        .unwrap_or(serde_json::Value::Null);
+                                let t0 = std::time::Instant::now();
+                                let result = registry
+                                    .dispatch(&name, args)
+                                    .unwrap_or_else(|e| {
+                                        warn!(tool = %name, error = %e, "tool dispatch failed");
+                                        format!("error: {}", e)
+                                    });
+                                let dur = t0.elapsed().as_micros() as u64;
+                                debug!(
+                                    tool = %name,
+                                    duration_us = dur,
+                                    "tool completed"
+                                );
+                                (result, dur)
+                            }
+                        };
+
+                        let tool_result = ToolResult {
+                            name: name.to_string(),
+                            output: Ok(result.clone()),
+                            duration_us: dur,
+                        };
+                        observer.on_tool_end(&call_clone, &tool_result);
+                        (id.to_string(), name.to_string(), args_str.to_string(), result, dur)
+                    });
+                    (handle, sidecar_id, sidecar_name, sidecar_args)
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|(h, id, name, args_str)| {
+                    h.join().unwrap_or_else(|panic_payload| {
+                        let msg = panic_to_string(panic_payload);
+                        warn!(
+                            tool = %name,
+                            id = %id,
+                            panic = %msg,
+                            "tool thread panicked"
+                        );
+                        (
+                            id.to_string(),
+                            name.to_string(),
+                            args_str.to_string(),
+                            format!("error: tool thread panicked: {}", msg),
+                            0,
+                        )
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// Accumulate post-dispatch durations into quota counters, apply per-tool
+    /// result byte caps, frame each result into a `<tool_output>` Message,
+    /// and append to the message history.
+    fn frame_results(
+        &mut self,
+        results: Vec<ToolOutcome>,
+        quota_usage: &mut HashMap<String, QuotaUsage>,
+        use_legacy_stream: bool,
+    ) {
+        // M3: accumulate post-dispatch durations into the quota usage
+        // counters so the next turn's `max_duration_us` check is correct.
+        for (_id, name, _args, _result, dur) in &results {
+            if self.tool_quotas.contains_key(name) {
+                let u = quota_usage.entry(name.clone()).or_default();
+                u.duration_us = u.duration_us.saturating_add(*dur);
+            }
+        }
+
+        for (id, name, args_str, result, dur_us) in results {
+            if use_legacy_stream {
+                println!("[tool: {} ({:.2}ms)]", name, dur_us as f64 / 1000.0);
+            }
+            if let Some(s) = &self.store {
+                let log = ToolLog {
+                    name: &name,
+                    args: &args_str,
+                    result: &result,
+                    duration_us: dur_us,
+                };
+                if let Err(e) = s.log_tool(&self.session, &log) {
+                    eprintln!("log_tool: {}", e);
+                }
+            }
+            // M3: per-tool `max_result_bytes` is a tighter cap than the
+            // global `max_tool_result_bytes`. Apply it first if set.
+            let result = match self
+                .tool_quotas
+                .get(&name)
+                .and_then(|q| q.max_result_bytes)
+            {
+                Some(cap) if result.len() > cap => {
+                    let mut end = cap;
+                    while end > 0 && !result.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    result[..end].to_string()
+                }
+                _ => result,
+            };
+            // S4: frame + byte-cap before the result becomes a message.
+            let framed = self.frame_tool_output(&name, &id, &result);
+            let msg = Message {
+                role: "tool".into(),
+                content: Some(framed),
+                tool_calls: None,
+                tool_call_id: Some(id),
+                name: Some(name),
+            };
+            self.persist(&msg);
+            self.messages.push(msg);
+        }
+    }
+
     /// Run the agent loop on a new user input.
     ///
     /// Iterates up to `max_steps` times:
@@ -333,11 +580,12 @@ impl<B: LlmBackend> Agent<B> {
         let mut quota_usage: HashMap<String, QuotaUsage> = HashMap::new();
 
         // v0.3.1: wall-clock deadline for the whole step(). Checked at
-        // the top of every turn and again before dispatch. `None`
-        // preserves the unbounded v0.3 behavior.
+        // the top of every turn and again before dispatch. Captured by
+        // value (both types are Copy) so the closure doesn't borrow self.
         let step_started = std::time::Instant::now();
-        let deadline_check = |stage: &str| -> Result<(), String> {
-            if let Some(limit) = self.max_step_duration {
+        let max_step_duration = self.max_step_duration;
+        let deadline_check = move |stage: &str| -> Result<(), String> {
+            if let Some(limit) = max_step_duration {
                 if step_started.elapsed() >= limit {
                     return Err(format!(
                         "step deadline exceeded at {}: {}ms >= {}ms",
@@ -355,18 +603,8 @@ impl<B: LlmBackend> Agent<B> {
                 self.observer.on_step_error(&e);
                 return Err(e);
             }
-            // P1: avoid full-window clone. When history fits, borrow
-            // self.messages directly. When truncation is required, build
-            // just the minimum vector of messages that are actually sent.
-            let window_start = self.window_start();
-            let truncated_buf: Vec<Message> = match window_start {
-                Some(start) => self.windowed_truncated(start),
-                None => Vec::new(),
-            };
-            let send: &[Message] = match window_start {
-                Some(_) => &truncated_buf,
-                None => &self.messages,
-            };
+
+            let send = self.build_send_window();
 
             // Choose the token sink: prefer on_token, fall back to `stream`.
             let use_on_token = self.on_token.is_some();
@@ -386,7 +624,7 @@ impl<B: LlmBackend> Agent<B> {
                 let mut sink = |s: &str| cb(s);
                 let r = self
                     .backend
-                    .chat(send, &tools, Some(&mut sink))
+                    .chat(&send, &tools, Some(&mut sink))
                     .map_err(|e| {
                         let es = e.to_string();
                         error!(error = %es, "backend chat error");
@@ -402,7 +640,7 @@ impl<B: LlmBackend> Agent<B> {
                 };
                 let r = self
                     .backend
-                    .chat(send, &tools, Some(&mut sink))
+                    .chat(&send, &tools, Some(&mut sink))
                     .map_err(|e| {
                         let es = e.to_string();
                         error!(error = %es, "backend chat error");
@@ -413,7 +651,7 @@ impl<B: LlmBackend> Agent<B> {
                 r
             } else {
                 self.backend
-                    .chat(send, &tools, None)
+                    .chat(&send, &tools, None)
                     .map_err(|e| {
                         let es = e.to_string();
                         error!(error = %es, "backend chat error");
@@ -453,225 +691,9 @@ impl<B: LlmBackend> Agent<B> {
                 return Err(e);
             }
 
-            // v0.3 C2 + M3: sequentially evaluate each call's disposition
-            // (observer policy check) and quota state BEFORE spawning any
-            // scoped thread. Calls that are refused or over-quota get a
-            // synthetic result and are NOT dispatched.
-            //
-            // This preserves the parallel dispatch for allowed calls while
-            // keeping quota accounting deterministic.
-            enum CallDecision {
-                /// Allowed — will be dispatched in the scoped thread pool.
-                Allow,
-                /// Refused — synthetic result, skip actual dispatch.
-                Refused(String),
-            }
-            let observer_clone = self.observer.clone();
-            let decisions: Vec<CallDecision> = calls
-                .iter()
-                .map(|call| {
-                    // C2: observer policy gate
-                    if let Disposition::Refused(msg) = observer_clone.should_dispatch(call) {
-                        warn!(tool = %call.function.name, reason = %msg, "observer refused dispatch");
-                        return CallDecision::Refused(format!(
-                            "refused by observer: {}",
-                            msg
-                        ));
-                    }
-                    // M3: per-tool quota check
-                    if let Some(quota) = self.tool_quotas.get(&call.function.name) {
-                        let usage = quota_usage
-                            .entry(call.function.name.clone())
-                            .or_default();
-                        if let Some(max) = quota.max_calls {
-                            if usage.calls >= max {
-                                warn!(
-                                    tool = %call.function.name,
-                                    max = max,
-                                    "tool call quota exceeded"
-                                );
-                                return CallDecision::Refused(format!(
-                                    "quota exceeded: {} reached max {} calls this step",
-                                    call.function.name, max
-                                ));
-                            }
-                        }
-                        if let Some(max_us) = quota.max_duration_us {
-                            if usage.duration_us >= max_us {
-                                warn!(
-                                    tool = %call.function.name,
-                                    max_us = max_us,
-                                    "tool duration quota exceeded"
-                                );
-                                return CallDecision::Refused(format!(
-                                    "quota exceeded: {} reached max {}µs wall time this step",
-                                    call.function.name, max_us
-                                ));
-                            }
-                        }
-                        // Reserve the call slot before dispatching.
-                        usage.calls += 1;
-                    }
-                    CallDecision::Allow
-                })
-                .collect();
+            let results = self.dispatch_calls(calls, &mut quota_usage);
 
-            let registry = &self.tools;
-            let observer = self.observer.clone();
-            // P1 + S5: run dispatch in scoped threads. If a worker panics
-            // its join error is converted to an error string and surfaced
-            // as the tool result, so the loop continues. Refused calls
-            // (C2/M3) skip the actual dispatch but still fire on_tool_start
-            // / on_tool_end so observers see the full lifecycle.
-            // (tool_call_id, tool_name, args_json, result_body, duration_us).
-            // Same shape coming out of the scoped threads and the join
-            // fallback, so the downstream message-assembly loop can treat
-            // panicked and successful paths uniformly.
-            type ToolOutcome = (String, String, String, String, u64);
-            let results: Vec<ToolOutcome> =
-                std::thread::scope(|s| {
-                    // We carry (id, name, args_str) alongside each handle so
-                    // a panicked worker thread keeps its attribution on the
-                    // way out. v0.3 dropped these fields into empty strings
-                    // in the join fallback, which meant the SQLite tool_log
-                    // and downstream observers couldn't tell which tool
-                    // blew up. v0.3.1 threads the sidecar through.
-                    type Handle<'s> = (
-                        std::thread::ScopedJoinHandle<'s, ToolOutcome>,
-                        Arc<str>,
-                        Arc<str>,
-                        Arc<str>,
-                    );
-                    let handles: Vec<Handle<'_>> = calls
-                        .iter()
-                        .zip(decisions.into_iter())
-                        .map(|(call, decision)| {
-                            let name: Arc<str> = Arc::from(call.function.name.as_str());
-                            let id: Arc<str> = Arc::from(call.id.as_str());
-                            let args_str: Arc<str> = Arc::from(call.function.arguments.as_str());
-                            let sidecar_id = Arc::clone(&id);
-                            let sidecar_name = Arc::clone(&name);
-                            let sidecar_args = Arc::clone(&args_str);
-                            let observer = observer.clone();
-                            let call_clone = call.clone();
-                            let handle = s.spawn(move || {
-                                let _tool_span = info_span!(
-                                    "agnt.tool",
-                                    name = %name,
-                                    id = %id,
-                                )
-                                .entered();
-                                observer.on_tool_start(&call_clone);
-
-                                let (result, dur) = match decision {
-                                    CallDecision::Refused(msg) => (msg, 0u64),
-                                    CallDecision::Allow => {
-                                        let args: serde_json::Value =
-                                            serde_json::from_str(&args_str)
-                                                .unwrap_or(serde_json::Value::Null);
-                                        let t0 = std::time::Instant::now();
-                                        let result = registry
-                                            .dispatch(&name, args)
-                                            .unwrap_or_else(|e| {
-                                                warn!(tool = %name, error = %e, "tool dispatch failed");
-                                                format!("error: {}", e)
-                                            });
-                                        let dur = t0.elapsed().as_micros() as u64;
-                                        debug!(
-                                            tool = %name,
-                                            duration_us = dur,
-                                            "tool completed"
-                                        );
-                                        (result, dur)
-                                    }
-                                };
-
-                                let tool_result = ToolResult {
-                                    name: name.to_string(),
-                                    output: Ok(result.clone()),
-                                    duration_us: dur,
-                                };
-                                observer.on_tool_end(&call_clone, &tool_result);
-                                (id.to_string(), name.to_string(), args_str.to_string(), result, dur)
-                            });
-                            (handle, sidecar_id, sidecar_name, sidecar_args)
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .map(|(h, id, name, args_str)| {
-                            h.join().unwrap_or_else(|panic_payload| {
-                                let msg = panic_to_string(panic_payload);
-                                warn!(
-                                    tool = %name,
-                                    id = %id,
-                                    panic = %msg,
-                                    "tool thread panicked"
-                                );
-                                (
-                                    id.to_string(),
-                                    name.to_string(),
-                                    args_str.to_string(),
-                                    format!("error: tool thread panicked: {}", msg),
-                                    0,
-                                )
-                            })
-                        })
-                        .collect()
-                });
-
-            // M3: accumulate post-dispatch durations into the quota usage
-            // counters so the next turn's `max_duration_us` check is correct.
-            for (_id, name, _args, _result, dur) in &results {
-                if self.tool_quotas.contains_key(name) {
-                    let u = quota_usage.entry(name.clone()).or_default();
-                    u.duration_us = u.duration_us.saturating_add(*dur);
-                }
-            }
-
-            for (id, name, args_str, result, dur_us) in results {
-                if use_legacy_stream {
-                    println!("[tool: {} ({:.2}ms)]", name, dur_us as f64 / 1000.0);
-                }
-                if let Some(s) = &self.store {
-                    let log = ToolLog {
-                        name: &name,
-                        args: &args_str,
-                        result: &result,
-                        duration_us: dur_us,
-                    };
-                    if let Err(e) = s.log_tool(&self.session, &log) {
-                        eprintln!("log_tool: {}", e);
-                    }
-                }
-                // M3: per-tool `max_result_bytes` is a tighter cap than the
-                // global `max_tool_result_bytes`. Apply it first if set.
-                let result = match self
-                    .tool_quotas
-                    .get(&name)
-                    .and_then(|q| q.max_result_bytes)
-                {
-                    Some(cap) if result.len() > cap => {
-                        let mut end = cap;
-                        while end > 0 && !result.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        result[..end].to_string()
-                    }
-                    _ => result,
-                };
-                // S4: frame + byte-cap before the result becomes a message.
-                let framed = self.frame_tool_output(&name, &id, &result);
-                let msg = Message {
-                    role: "tool".into(),
-                    content: Some(framed),
-                    tool_calls: None,
-                    tool_call_id: Some(id),
-                    name: Some(name),
-                };
-                self.persist(&msg);
-                self.messages.push(msg);
-            }
+            self.frame_results(results, &mut quota_usage, use_legacy_stream);
         }
 
         let err = "max steps exceeded".to_string();
