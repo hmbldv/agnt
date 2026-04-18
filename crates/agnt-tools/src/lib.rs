@@ -39,9 +39,16 @@ pub mod sandbox;
 pub mod ssrf;
 
 pub use builtins::{EditFile, Fetch, Glob, Grep, ListDir, ReadFile, WriteFile};
-pub use sandbox::FilesystemRoot;
+pub use sandbox::{FilesystemRoot, SandboxedPath};
 
 /// The CVE-class `Shell` tool. Only available when the `shell` cargo feature
 /// is enabled. See [`builtins::Shell`] for the full threat-model rustdoc.
 #[cfg(feature = "shell")]
 pub use builtins::Shell;
+
+/// Read-only system information tools. Available when the `system-tools` cargo
+/// feature is enabled. All commands are hardcoded — no injection surface.
+#[cfg(feature = "system-tools")]
+pub mod system;
+#[cfg(feature = "system-tools")]
+pub use system::{DiskUsage, DockerPs, NvidiaSmi, SystemInfo};

@@ -19,6 +19,7 @@
 //! subsequent resolutions are compared against that canonical prefix.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 /// A canonicalized sandbox root. All paths resolved through this instance are
 /// guaranteed to live under the root directory on the local filesystem.
@@ -115,6 +116,36 @@ impl FilesystemRoot {
 
         Ok(parent_canonical.join(file_name))
     }
+}
+
+/// Wraps an optional [`FilesystemRoot`] sandbox. Each filesystem tool holds one;
+/// methods centralize the `None` → unrestricted / `Some` → sandboxed dispatch
+/// that was previously duplicated across every tool.
+pub struct SandboxedPath(pub(crate) Option<Arc<FilesystemRoot>>);
+
+impl SandboxedPath {
+    /// No sandbox — tool has unrestricted path access.
+    pub fn new() -> Self { Self(None) }
+
+    /// Sandbox-restricted — all paths must resolve under `root`.
+    pub fn with_root(root: Arc<FilesystemRoot>) -> Self { Self(Some(root)) }
+
+    /// Resolve `input` against the sandbox, or pass it through when unsandboxed.
+    pub fn resolve(&self, input: &str) -> Result<PathBuf, String> {
+        match &self.0 {
+            Some(s) => s.resolve(input),
+            None => Ok(PathBuf::from(input)),
+        }
+    }
+
+    /// Return the sandbox root path, or `None` when unsandboxed.
+    pub fn root(&self) -> Option<&Path> {
+        self.0.as_ref().map(|r| r.root())
+    }
+}
+
+impl Default for SandboxedPath {
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]

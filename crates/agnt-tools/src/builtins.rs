@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::sandbox::FilesystemRoot;
+use crate::sandbox::{FilesystemRoot, SandboxedPath};
 
 // ------------------------------------------------------------------------------------------------
 // ReadFile
@@ -28,7 +28,7 @@ const READ_FILE_MAX: usize = 256 * 1024;
 /// can read any file the process has access to. Pair with a
 /// [`FilesystemRoot`] when exposing to untrusted LLM output.
 pub struct ReadFile {
-    sandbox: Option<Arc<FilesystemRoot>>,
+    sandbox: SandboxedPath,
 }
 
 impl Default for ReadFile {
@@ -38,19 +38,12 @@ impl Default for ReadFile {
 impl ReadFile {
     /// Unsandboxed constructor — full-host read access. Use only in trusted
     /// contexts.
-    pub fn new() -> Self { Self { sandbox: None } }
+    pub fn new() -> Self { Self { sandbox: SandboxedPath::new() } }
 
     /// Sandboxed constructor — paths are resolved against `sandbox` and
     /// rejected if they escape the root.
     pub fn with_sandbox(sandbox: Arc<FilesystemRoot>) -> Self {
-        Self { sandbox: Some(sandbox) }
-    }
-}
-
-fn resolve_path(sandbox: &Option<Arc<FilesystemRoot>>, input: &str) -> Result<PathBuf, String> {
-    match sandbox {
-        Some(s) => s.resolve(input),
-        None => Ok(PathBuf::from(input)),
+        Self { sandbox: SandboxedPath::with_root(sandbox) }
     }
 }
 
@@ -70,7 +63,7 @@ impl Tool for ReadFile {
     }
     fn call(&self, args: Value) -> Result<String, String> {
         let path = args["path"].as_str().ok_or("missing path")?;
-        let resolved = resolve_path(&self.sandbox, path)?;
+        let resolved = self.sandbox.resolve(path)?;
         let content = fs::read_to_string(&resolved)
             .map_err(|e| format!("read {}: {}", resolved.display(), e))?;
         if content.len() <= READ_FILE_MAX {
@@ -116,7 +109,7 @@ impl Tool for ReadFile {
 /// each agent in its own bwrap/container/landlock view — the lockfile
 /// pattern is designed for the single-tenant case.
 pub struct EditFile {
-    sandbox: Option<Arc<FilesystemRoot>>,
+    sandbox: SandboxedPath,
 }
 
 impl Default for EditFile {
@@ -124,9 +117,9 @@ impl Default for EditFile {
 }
 
 impl EditFile {
-    pub fn new() -> Self { Self { sandbox: None } }
+    pub fn new() -> Self { Self { sandbox: SandboxedPath::new() } }
     pub fn with_sandbox(sandbox: Arc<FilesystemRoot>) -> Self {
-        Self { sandbox: Some(sandbox) }
+        Self { sandbox: SandboxedPath::with_root(sandbox) }
     }
 }
 
@@ -157,7 +150,7 @@ impl Tool for EditFile {
             return Err("'old' must not be empty".into());
         }
 
-        let resolved = resolve_path(&self.sandbox, path)?;
+        let resolved = self.sandbox.resolve(path)?;
 
         // Lock a stable sibling lockfile. Locking the target file directly
         // does not work because atomic-rename swaps the inode — other waiters
@@ -255,7 +248,7 @@ impl Tool for EditFile {
 // ------------------------------------------------------------------------------------------------
 
 pub struct WriteFile {
-    sandbox: Option<Arc<FilesystemRoot>>,
+    sandbox: SandboxedPath,
 }
 
 impl Default for WriteFile {
@@ -263,9 +256,9 @@ impl Default for WriteFile {
 }
 
 impl WriteFile {
-    pub fn new() -> Self { Self { sandbox: None } }
+    pub fn new() -> Self { Self { sandbox: SandboxedPath::new() } }
     pub fn with_sandbox(sandbox: Arc<FilesystemRoot>) -> Self {
-        Self { sandbox: Some(sandbox) }
+        Self { sandbox: SandboxedPath::with_root(sandbox) }
     }
 }
 
@@ -285,7 +278,7 @@ impl Tool for WriteFile {
     fn call(&self, args: Value) -> Result<String, String> {
         let path = args["path"].as_str().ok_or("missing path")?;
         let content = args["content"].as_str().ok_or("missing content")?;
-        let resolved = resolve_path(&self.sandbox, path)?;
+        let resolved = self.sandbox.resolve(path)?;
         fs::write(&resolved, content)
             .map_err(|e| format!("write {}: {}", resolved.display(), e))?;
         Ok(format!("wrote {} bytes to {}", content.len(), resolved.display()))
@@ -297,7 +290,7 @@ impl Tool for WriteFile {
 // ------------------------------------------------------------------------------------------------
 
 pub struct ListDir {
-    sandbox: Option<Arc<FilesystemRoot>>,
+    sandbox: SandboxedPath,
 }
 
 impl Default for ListDir {
@@ -305,9 +298,9 @@ impl Default for ListDir {
 }
 
 impl ListDir {
-    pub fn new() -> Self { Self { sandbox: None } }
+    pub fn new() -> Self { Self { sandbox: SandboxedPath::new() } }
     pub fn with_sandbox(sandbox: Arc<FilesystemRoot>) -> Self {
-        Self { sandbox: Some(sandbox) }
+        Self { sandbox: SandboxedPath::with_root(sandbox) }
     }
 }
 
@@ -327,7 +320,7 @@ impl Tool for ListDir {
     }
     fn call(&self, args: Value) -> Result<String, String> {
         let path = args["path"].as_str().ok_or("missing path")?;
-        let resolved = resolve_path(&self.sandbox, path)?;
+        let resolved = self.sandbox.resolve(path)?;
         let mut out = String::new();
         for entry in fs::read_dir(&resolved)
             .map_err(|e| format!("read_dir {}: {}", resolved.display(), e))?
@@ -602,7 +595,7 @@ impl Tool for Shell {
 // ------------------------------------------------------------------------------------------------
 
 pub struct Glob {
-    sandbox: Option<Arc<FilesystemRoot>>,
+    sandbox: SandboxedPath,
 }
 
 impl Default for Glob {
@@ -610,9 +603,9 @@ impl Default for Glob {
 }
 
 impl Glob {
-    pub fn new() -> Self { Self { sandbox: None } }
+    pub fn new() -> Self { Self { sandbox: SandboxedPath::new() } }
     pub fn with_sandbox(sandbox: Arc<FilesystemRoot>) -> Self {
-        Self { sandbox: Some(sandbox) }
+        Self { sandbox: SandboxedPath::with_root(sandbox) }
     }
 }
 
@@ -636,8 +629,8 @@ impl Tool for Glob {
         // When sandboxed, require the pattern to be a relative path under the
         // root. We anchor by joining the pattern onto the root and checking
         // that it stays under the root (which also rejects `..`).
-        let (effective_pattern, root_strip): (String, Option<PathBuf>) = match &self.sandbox {
-            Some(s) => {
+        let (effective_pattern, root_strip): (String, Option<PathBuf>) = match self.sandbox.root() {
+            Some(root) => {
                 if Path::new(pattern).is_absolute() {
                     return Err(format!(
                         "glob pattern must be relative when sandboxed: {}",
@@ -647,9 +640,9 @@ impl Tool for Glob {
                 if pattern.split('/').any(|seg| seg == "..") {
                     return Err(format!("glob pattern contains '..': {}", pattern));
                 }
-                let joined = s.root().join(pattern);
+                let joined = root.join(pattern);
                 let eff = joined.to_string_lossy().into_owned();
-                (eff, Some(s.root().to_path_buf()))
+                (eff, Some(root.to_path_buf()))
             }
             None => (pattern.to_string(), None),
         };
@@ -691,7 +684,7 @@ impl Tool for Glob {
 // ------------------------------------------------------------------------------------------------
 
 pub struct Grep {
-    sandbox: Option<Arc<FilesystemRoot>>,
+    sandbox: SandboxedPath,
 }
 
 impl Default for Grep {
@@ -699,9 +692,9 @@ impl Default for Grep {
 }
 
 impl Grep {
-    pub fn new() -> Self { Self { sandbox: None } }
+    pub fn new() -> Self { Self { sandbox: SandboxedPath::new() } }
     pub fn with_sandbox(sandbox: Arc<FilesystemRoot>) -> Self {
-        Self { sandbox: Some(sandbox) }
+        Self { sandbox: SandboxedPath::with_root(sandbox) }
     }
 }
 
@@ -725,7 +718,7 @@ impl Tool for Grep {
         let pattern = args["pattern"].as_str().ok_or("missing pattern")?;
         let path = args["path"].as_str().ok_or("missing path")?;
         let ext = args["ext"].as_str();
-        let resolved = resolve_path(&self.sandbox, path)?;
+        let resolved = self.sandbox.resolve(path)?;
         let re = regex::Regex::new(pattern).map_err(|e| format!("regex: {}", e))?;
         let mut out = String::new();
         let mut count = 0usize;
@@ -738,9 +731,9 @@ impl Tool for Grep {
                 if entry.path().extension().and_then(|s| s.to_str()) != Some(e) { continue; }
             }
             // When sandboxed, skip any file whose canonical path escapes the root.
-            if let Some(sbx) = &self.sandbox {
+            if let Some(root) = self.sandbox.root() {
                 if let Ok(canonical) = std::fs::canonicalize(entry.path()) {
-                    if !canonical.starts_with(sbx.root()) {
+                    if !canonical.starts_with(root) {
                         continue;
                     }
                 }

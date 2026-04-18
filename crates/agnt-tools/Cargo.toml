@@ -25,6 +25,9 @@ shell = []
 # v0.3 C1: bubblewrap sandbox for the Shell tool. Linux only.
 # Defense in depth on top of the argv allowlist.
 bwrap-shell = ["shell"]
+# Read-only system-info tools: DiskUsage, SystemInfo, DockerPs, NvidiaSmi.
+# All commands are hardcoded; no user-supplied paths or command-injection surface.
+system-tools = []
 
 [dependencies]
 agnt-core = { version = "0.3", path = "../agnt-core" }
