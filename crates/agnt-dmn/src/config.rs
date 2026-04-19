@@ -19,8 +19,10 @@ pub struct Config {
     pub base_url: Option<String>,
     #[serde(default)]
     pub store_path: Option<String>,
+    /// Bearer token callers must supply in the `Authorization` header.
+    /// The daemon refuses to start if this is empty.
     #[serde(default)]
-    pub exposes: Vec<String>,
+    pub auth_token: String,
     /// Remap tool-result messages to `role: "user"` before sending to the
     /// backend. Required for Gemma 4 on vllm whose chat template embeds tool
     /// responses inside the model turn and leaves no follow-up generation
@@ -43,7 +45,7 @@ impl Default for Config {
             api_key: None,
             base_url: None,
             store_path: None,
-            exposes: vec![],
+            auth_token: String::new(),
             tool_result_as_user: false,
         }
     }

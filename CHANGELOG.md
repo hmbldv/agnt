@@ -4,6 +4,123 @@ All notable changes to `agnt` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [agnt-dmn 0.1.1] — 2026-04-19
+
+`agnt-dmn` is the HTTP daemon wrapping agnt-core. This is its first hardened
+release — the initial 0.1.0 implementation was never published to crates.io.
+The following issues were found and fixed via adversarial review before
+publication.
+
+### 🔒 Security (Critical)
+
+- **Authentication** — All endpoints now require a static Bearer token
+  configured via `auth_token` in `dmn.toml`. Token comparison uses a
+  constant-time equality check. The daemon refuses to start if `auth_token`
+  is empty — there is no insecure default. Previously, every endpoint was
+  accessible with no authentication from any network peer.
+- **Direct tool dispatch removed** — The `/tool` endpoint, which allowed
+  unauthenticated callers to invoke registered tools directly (bypassing all
+  agent-level controls, quotas, and observer policy), has been removed. All
+  tool invocations must go through the agent loop via `/step` or
+  `/step/stream`.
+- **Session ID validation** — Session IDs are now validated to UUID-safe
+  characters (alphanumeric, `-`, `_`), capped at 64 bytes, and limited to
+  10,000 concurrent sessions. Previously, arbitrary session IDs could be used
+  to access other sessions' history or cause unbounded HashMap growth.
+
+### 🔒 Security (Medium)
+
+- **Bounded SSE channel** — The SSE streaming channel is now bounded at 256
+  items. Events are dropped rather than blocked when the channel is full.
+  Previously, a slow client could cause unbounded memory growth in the daemon
+  process.
+- **Dead config field removed** — The `exposes: Vec<String>` config field was
+  parsed but never read — operators configuring it believed it had an effect.
+  It has been removed.
+- **SSE panic surfacing** — Internal panics in the streaming agent step are
+  now surfaced to the client as an `error` SSE event. Previously, panics
+  silently left the client's SSE stream open indefinitely.
+
+### 🛠 Other
+
+- `rust-version = "1.75"` added to `Cargo.toml` (consistent with workspace
+  MSRV).
+- WARN-level log emitted at startup when `tool_result_as_user = true`
+  (elevated prompt injection risk).
+- THREAT_MODEL.md updated with agnt-dmn threat surface documentation.
+
+## [agnt-engine 0.1.1] — 2026-04-19
+
+`agnt-engine` is the async execution runtime wrapping agnt-core with retry,
+budget, and cron scheduling. This is its first hardened release — the initial
+0.1.0 was never published.
+
+### 🔒 Security (High)
+
+- **Timeout enforcement** — `attempt_timeout_secs` from the task's
+  `TerminalPolicy` is now enforced via `tokio::time::timeout` wrapping
+  `spawn_blocking`. Previously the field was assigned but never used — agent
+  steps could run indefinitely, occupying blocking thread pool slots until the
+  process was killed. The default timeout is 300 seconds.
+- **Retry classification hardened** — `classify_error` now truncates its input
+  to 256 bytes before pattern matching. Previously, LLM-generated content in
+  error strings could manipulate retry behavior by injecting keywords that
+  reclassified non-retryable errors as retryable.
+
+### 🔒 Security (Medium)
+
+- **Cron OOM prevention** — `parse_field` now validates range bounds against
+  the field's min/max before allocating. A crafted expression like
+  `"0-999999999"` previously allocated a billion-element Vec, causing OOM.
+  Invalid ranges now return `None` (parse error).
+
+### 🔒 Security (Low)
+
+- **Loop interval guard** — Loop execution mode now rejects `interval_secs =
+  0`. Zero-interval loops previously created a tight spin consuming CPU and
+  API budget without bound.
+
+### 🛠 Other
+
+- `rust-version = "1.75"` added to `Cargo.toml` (consistent with workspace
+  MSRV).
+- THREAT_MODEL.md updated with agnt-engine threat surface documentation.
+
+## [agnt-tools 0.3.3] — 2026-04-19
+
+Security patch scoped to `agnt-tools` (+ flagship re-export bump).
+`agnt-core`, `agnt-net`, `agnt-store`, `agnt-macros`, `agnt-mcp` remain at
+`0.3.1`.
+
+### 🔒 Security (High)
+
+- **`Fetch` now enforces connect + read timeouts.** The v0.3.1 DNS rebinding
+  fix moved `Fetch` to a per-instance `ureq::Agent` with a custom
+  `SsrfResolver`, but the builder never set connect or read timeouts. A
+  stalled target — slowloris, half-open TCP, a server that accepts the
+  connection and never speaks — pinned a Fetch call until `max_step_duration`
+  fired (120s by default). Combined with a daemon exposing the agent loop over
+  HTTP, this enabled cheap DoS via a few concurrent requests aimed at an
+  attacker-controlled slow endpoint. `FETCH_CONNECT_TIMEOUT = 10s` and
+  `FETCH_READ_TIMEOUT = 30s` are now enforced. Both are `pub const` so
+  downstream crates can cite them when reasoning about worst-case Fetch
+  latency.
+
+### ✨ New
+
+- **`FilesystemRoot::with_denylist`** — builder method that rejects any
+  resolved path under a configured set of canonicalized entries, regardless
+  of where the sandbox root sits. Designed for host applications that set a
+  broad root (e.g. `$HOME`) but must unconditionally deny sensitive subpaths
+  like `~/.ssh`, `~/.aws/credentials`, `~/.gnupg`. Canonicalization applies
+  to both denylist entries (at construction) and the incoming path (at resolve
+  time), so a symlink that tunnels back into a denied subtree is correctly
+  rejected.
+
+## [0.3.3] — 2026-04-19
+
+Flagship version bump to track `agnt-tools 0.3.3`. No API changes.
+
 ## [0.3.2] — 2026-04-12
 
 Flagship-crate-only ergonomics patch. No underlying crate (`agnt-core`,

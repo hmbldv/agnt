@@ -257,3 +257,55 @@ findings (Shell RCE, path traversal, SSRF). The v0.2 hardening pass
 addressed all three. v0.3.1 closed a High-severity DNS rebinding
 TOCTOU in `Fetch` that the v0.3 adversarial review identified. New
 findings will be triaged with the same urgency.
+
+## agnt-dmn Threat Surface
+
+`agnt-dmn` is an HTTP daemon that exposes the agnt agent loop over a network interface. It introduces a network-facing attack surface not present in the core library crates.
+
+### Authentication
+
+All endpoints require a static Bearer token configured via `auth_token` in `dmn.toml`. The daemon refuses to start if `auth_token` is empty. Token comparison uses a constant-time equality check to prevent timing attacks.
+
+### Session isolation
+
+Session IDs are validated to UUID-safe characters (alphanumeric, `-`, `_`), capped at 64 bytes, and limited to 10,000 concurrent sessions per daemon instance. Sessions are keyed by ID only — in single-tenant deployments, the auth token provides caller identity. Multi-tenant isolation requires a separate auth layer.
+
+### SSE streaming
+
+The SSE channel is bounded at 256 items per connection. Events are dropped (not blocked) when the channel is full. Slow clients cannot cause unbounded memory growth.
+
+### Tool dispatch
+
+Direct tool dispatch via HTTP is not supported. All tool calls must go through the agent loop via `/step` or `/step/stream`, which enforces Observer policy, per-tool quotas, and the full security stack from agnt-core.
+
+### `tool_result_as_user` flag
+
+When enabled, tool results are injected as `user`-role messages rather than `tool`-role messages (workaround for backends that do not support the tool-call format). This elevates prompt injection risk because models typically weight user messages more heavily than tool output. A `WARN`-level log is emitted at startup when this flag is set. The `<tool_output>` envelope remains the primary mitigation.
+
+### Deployment model
+
+agnt-dmn is designed for trusted private networks (e.g., Tailscale mesh). Network ACLs are defense-in-depth, not a replacement for application-level authentication.
+
+## agnt-engine Threat Surface
+
+`agnt-engine` wraps the agnt-core agent loop with async execution policies: retry, recovery, budget, and cron scheduling.
+
+### Timeout enforcement
+
+Each agent step is wrapped in `tokio::time::timeout` using the `attempt_timeout_secs` value from the task's `TerminalPolicy`. Steps that exceed the timeout are cancelled and classified as `EngineError::Timeout`. The default timeout is 300 seconds.
+
+### Error classification
+
+The `classify_error` function maps error strings to retry classes. Input is truncated to 256 bytes before matching to prevent LLM-generated content in error messages from manipulating retry behavior (e.g., causing non-retryable errors to be retried by injecting retryable keywords).
+
+### Cron scheduling
+
+Cron expressions are validated at parse time. Range fields (`start-end`) are checked against the field's valid min/max before allocation. Invalid expressions are rejected; the engine does not panic on malformed cron input.
+
+### Loop mode
+
+Loop execution requires `interval_secs >= 1`. Zero-interval loops are rejected at submission time to prevent tight-spin resource exhaustion.
+
+### Budget enforcement
+
+Credits are tracked via `AtomicU64` shared between the `EngineObserver` and `EngineState`. `budget_allocated = 0` disables budget enforcement — intended for trusted internal callers only. Production deployments should set an explicit budget via the task's `BudgetPolicy`.

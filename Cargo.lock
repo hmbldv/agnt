@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agnt"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "agnt-core",
  "agnt-engine",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-dmn"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agnt-core",
  "agnt-engine",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agnt-core",
  "chrono",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "agnt-tools"
-version = "0.3.1"
+version = "0.3.3"
 dependencies = [
  "agnt-core",
  "fs2",
@@ -133,6 +133,7 @@ dependencies = [
  "regex",
  "serde_json",
  "shell-words",
+ "tempfile",
  "tracing",
  "ureq",
  "url",

@@ -1,7 +1,8 @@
 [package]
 name = "agnt-engine"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+rust-version = "1.75"
 description = "Async execution runtime wrapping agnt-core with retry, recovery, budget, and session contracts"
 license = "MIT OR Apache-2.0"
 

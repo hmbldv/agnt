@@ -6,10 +6,11 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
 use agnt_core::{LlmBackend, Message, Observer, ToolCall, ToolResult};
@@ -64,7 +65,9 @@ pub async fn step<B: LlmBackend + Clone + 'static>(
     State(state): State<Arc<DmnState<B>>>,
     Json(req): Json<StepRequest>,
 ) -> Result<Json<StepResponse>, (StatusCode, String)> {
-    let session = state.get_or_create_session(&req.session_id);
+    let session = state
+        .get_or_create_session(&req.session_id)
+        .map_err(|sc| (sc, "invalid or rate-limited session id".into()))?;
 
     // Create agent in a blocking task (agnt-core is sync)
     let state_clone = state.clone();
@@ -96,8 +99,18 @@ struct SseItem {
 }
 
 struct SseObserver {
-    tx: mpsc::UnboundedSender<SseItem>,
+    tx: mpsc::Sender<SseItem>,
     session_id: String,
+}
+
+impl SseObserver {
+    /// Send an item on the bounded channel, logging if the channel is full.
+    /// Events are dropped rather than blocking the agent thread.
+    fn send(&self, item: SseItem) {
+        if self.tx.try_send(item).is_err() {
+            tracing::debug!("sse channel full, dropping event");
+        }
+    }
 }
 
 impl Observer for SseObserver {
@@ -106,7 +119,7 @@ impl Observer for SseObserver {
             "name": call.function.name,
             "args": call.function.arguments,
         });
-        let _ = self.tx.send(SseItem { event: "tool_call", json: data.to_string() });
+        self.send(SseItem { event: "tool_call", json: data.to_string() });
     }
 
     fn on_tool_end(&self, call: &ToolCall, result: &ToolResult) {
@@ -130,7 +143,7 @@ impl Observer for SseObserver {
             "result": display,
             "duration_ms": result.duration_us as f64 / 1000.0,
         });
-        let _ = self.tx.send(SseItem { event: "tool_result", json: data.to_string() });
+        self.send(SseItem { event: "tool_result", json: data.to_string() });
     }
 
     fn on_step_end(&self, response: &Message) {
@@ -138,23 +151,30 @@ impl Observer for SseObserver {
             "session_id": self.session_id,
             "response": response.content.as_deref().unwrap_or(""),
         });
-        let _ = self.tx.send(SseItem { event: "complete", json: data.to_string() });
+        self.send(SseItem { event: "complete", json: data.to_string() });
     }
 
     fn on_step_error(&self, error: &str) {
         let data = serde_json::json!({ "message": error });
-        let _ = self.tx.send(SseItem { event: "error", json: data.to_string() });
+        self.send(SseItem { event: "error", json: data.to_string() });
     }
 }
 
 pub async fn step_stream<B: LlmBackend + Clone + 'static>(
     State(state): State<Arc<DmnState<B>>>,
     Json(req): Json<StepRequest>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let session = state.get_or_create_session(&req.session_id);
-    let (tx, rx) = mpsc::unbounded_channel::<SseItem>();
+) -> Response {
+    let session = match state.get_or_create_session(&req.session_id) {
+        Ok(s) => s,
+        Err(sc) => return sc.into_response(),
+    };
 
-    let _ = tx.send(SseItem {
+    // Bounded channel — callers that can't keep up receive dropped events
+    // rather than causing unbounded memory growth. 256 is generous for typical
+    // agent runs (tool calls + tokens) while still capping exposure.
+    let (tx, rx) = mpsc::channel::<SseItem>(256);
+
+    let _ = tx.try_send(SseItem {
         event: "session_start",
         json: serde_json::json!({
             "session_id": session,
@@ -167,6 +187,8 @@ pub async fn step_stream<B: LlmBackend + Clone + 'static>(
     // Both are dropped when the blocking task exits, which closes the channel.
     let tx_obs = tx.clone();
     let tx_tok = tx.clone();
+    // Clone for the panic-surface watcher.
+    let tx_err = tx.clone();
     drop(tx);
 
     let observer = Arc::new(SseObserver {
@@ -175,67 +197,39 @@ pub async fn step_stream<B: LlmBackend + Clone + 'static>(
     });
 
     let state_clone = state.clone();
-    tokio::task::spawn_blocking(move || {
+    let handle = tokio::task::spawn_blocking(move || {
         let mut agent = state_clone.agent_factory.create(&session, req.system_prompt.as_deref());
         agent.observer = observer as Arc<dyn agnt_core::Observer>;
         agent.on_token = Some(Box::new(move |tok| {
             let data = serde_json::json!({ "content": tok });
-            let _ = tx_tok.send(SseItem { event: "token", json: data.to_string() });
+            if tx_tok.try_send(SseItem { event: "token", json: data.to_string() }).is_err() {
+                tracing::debug!("sse channel full, dropping token event");
+            }
         }));
         let _ = agent.step(&req.prompt);
         // agent drops here → observer (tx_obs) and on_token (tx_tok) drop → channel closes
     });
 
-    let stream = UnboundedReceiverStream::new(rx).map(|item| {
+    // Surface panics in the blocking task back to the SSE client so the
+    // connection doesn't just silently stall.
+    tokio::spawn(async move {
+        if handle.await.is_err() {
+            let data = serde_json::json!({ "message": "internal agent task panicked" });
+            let _ = tx_err.try_send(SseItem { event: "error", json: data.to_string() });
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|item| {
         Ok::<Event, Infallible>(Event::default().event(item.event).data(item.json))
     });
 
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("ping"),
-    )
-}
-
-// --- Tool dispatch (direct, no inference) ---
-
-#[derive(Deserialize)]
-pub struct ToolRequest {
-    pub name: String,
-    pub args: serde_json::Value,
-}
-
-#[derive(Serialize)]
-pub struct ToolResponse {
-    pub name: String,
-    pub result: String,
-    pub is_error: bool,
-}
-
-pub async fn tool<B: LlmBackend + Clone + 'static>(
-    State(state): State<Arc<DmnState<B>>>,
-    Json(req): Json<ToolRequest>,
-) -> Result<Json<ToolResponse>, (StatusCode, String)> {
-    let registry = state.agent_factory.registry.clone();
-
-    let result = tokio::task::spawn_blocking(move || {
-        match registry.dispatch(&req.name, req.args) {
-            Ok(output) => ToolResponse {
-                name: req.name,
-                result: output,
-                is_error: false,
-            },
-            Err(err) => ToolResponse {
-                name: req.name,
-                result: err,
-                is_error: true,
-            },
-        }
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task join: {}", e)))?;
-
-    Ok(Json(result))
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response()
 }
 
 // --- Session info ---

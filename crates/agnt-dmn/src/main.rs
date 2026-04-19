@@ -6,11 +6,13 @@
 
 mod config;
 mod handlers;
+mod middleware;
 mod state;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use axum::middleware as axum_middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::trace::TraceLayer;
@@ -30,6 +32,23 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load();
+
+    // Refuse to start without an auth token — running unauthenticated would
+    // expose tool dispatch and agent sessions to any local or network caller.
+    if config.auth_token.is_empty() {
+        eprintln!("error: auth_token must be set in dmn.toml — daemon refusing to start");
+        std::process::exit(1);
+    }
+
+    // Warn if tool results are injected as user-role messages; this widens
+    // the prompt-injection surface because tool output is trusted as user input.
+    if config.tool_result_as_user {
+        tracing::warn!(
+            "tool_result_as_user=true: tool results injected as user-role messages — \
+             elevated prompt injection risk. See THREAT_MODEL.md."
+        );
+    }
+
     let addr = config.addr();
 
     tracing::info!("dmn starting on {}", addr);
@@ -73,14 +92,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(handlers::health::<Backend>))
         .route("/step", post(handlers::step::<Backend>))
         .route("/step/stream", post(handlers::step_stream::<Backend>))
-        .route("/tool", post(handlers::tool::<Backend>))
         .route("/sessions", get(handlers::sessions::<Backend>))
         .route("/tools", get(handlers::tools::<Backend>));
 
     #[cfg(feature = "engine")]
     let app = app.route("/engine", post(handlers::run_engine::<Backend>));
 
+    // Auth middleware must wrap the full app so every endpoint is protected.
+    // The token is cloned into the middleware state separately from DmnState.
     let app = app
+        .layer(axum_middleware::from_fn_with_state(
+            config.auth_token.clone(),
+            middleware::require_auth,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
