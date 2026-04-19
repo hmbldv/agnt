@@ -56,6 +56,11 @@ fn main() {
         "anthropic" => Backend::anthropic(&model, &env_required("ANTHROPIC_API_KEY")),
         _ => Backend::ollama(&model),
     };
+    let backend = if let Ok(url) = std::env::var("AGNT_BASE_URL") {
+        backend.with_base_url(&url)
+    } else {
+        backend
+    };
 
     let mut agent = Agent::new(backend, &system);
     // v0.2 A8: prefer the on_token callback over the deprecated `stream` bool.

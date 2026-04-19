@@ -103,6 +103,11 @@ impl Backend {
     /// one.
     ///
     /// Returns an error if TLS initialization fails.
+    pub fn with_base_url(mut self, url: &str) -> Self {
+        self.base_url = url.to_string();
+        self
+    }
+
     pub fn with_timeouts(mut self, connect: Duration, read: Duration) -> Result<Self, String> {
         let agent = crate::http::build_agent(connect, read)?;
         self.agent = Some(Arc::new(agent));
@@ -378,6 +383,12 @@ fn to_openai_messages(msgs: &[Message]) -> Vec<Value> {
             {
                 obj["content"] = json!("");
             }
+            // Ollama rejects non-standard fields on tool-result messages.
+            if m.role == "tool" {
+                if let Some(obj) = obj.as_object_mut() {
+                    obj.remove("name");
+                }
+            }
             obj
         })
         .collect()
@@ -555,6 +566,7 @@ fn parse_openai_stream<R: Read>(
     let mut reader = BufReader::new(resp);
     let mut text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut slot_map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     let mut line = String::new();
 
     while read_sse_line(&mut reader, &mut line).map_err(|e| format!("stream: {}", e))? {
@@ -583,8 +595,39 @@ fn parse_openai_stream<R: Read>(
         }
         if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
             for tc in tcs {
-                let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                while tool_calls.len() <= idx {
+                let stream_idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let incoming_id = tc
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .filter(|s| !s.is_empty());
+                // Some providers (e.g. Ollama with gemma models) reuse index 0
+                // for every tool call instead of incrementing. Detect this by
+                // checking whether the slot at stream_idx already holds a
+                // *different* id — if so, this is a new tool call.
+                let real_slot = if let Some(id) = incoming_id {
+                    if let Some(&existing) = slot_map.get(&stream_idx) {
+                        if tool_calls[existing].id.is_empty() || tool_calls[existing].id == id {
+                            existing
+                        } else {
+                            let s = tool_calls.len();
+                            slot_map.insert(stream_idx, s);
+                            s
+                        }
+                    } else {
+                        let s = tool_calls.len();
+                        slot_map.insert(stream_idx, s);
+                        s
+                    }
+                } else {
+                    if let Some(&s) = slot_map.get(&stream_idx) {
+                        s
+                    } else {
+                        let s = tool_calls.len();
+                        slot_map.insert(stream_idx, s);
+                        s
+                    }
+                };
+                while tool_calls.len() <= real_slot {
                     tool_calls.push(ToolCall {
                         id: String::new(),
                         call_type: "function".into(),
@@ -594,11 +637,9 @@ fn parse_openai_stream<R: Read>(
                         },
                     });
                 }
-                let slot = &mut tool_calls[idx];
-                if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                    if !id.is_empty() {
-                        slot.id = id.to_string();
-                    }
+                let slot = &mut tool_calls[real_slot];
+                if let Some(id) = incoming_id {
+                    slot.id = id.to_string();
                 }
                 if let Some(f) = tc.get("function") {
                     if let Some(n) = f.get("name").and_then(|n| n.as_str()) {

@@ -15,8 +15,8 @@ pub struct Config {
     pub provider: String,
     #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default = "default_base_url")]
-    pub base_url: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
     #[serde(default)]
     pub store_path: Option<String>,
     #[serde(default)]
@@ -27,8 +27,6 @@ fn default_host() -> String { "127.0.0.1".into() }
 fn default_port() -> u16 { 7770 }
 fn default_model() -> String { "gemma3:4b".into() }
 fn default_provider() -> String { "ollama".into() }
-fn default_base_url() -> String { "http://localhost:11434".into() }
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -37,7 +35,7 @@ impl Default for Config {
             model: default_model(),
             provider: default_provider(),
             api_key: None,
-            base_url: default_base_url(),
+            base_url: None,
             store_path: None,
             exposes: vec![],
         }
@@ -72,6 +70,9 @@ impl Config {
 }
 
 pub fn config_path() -> PathBuf {
+    if let Ok(p) = std::env::var("DMN_CONFIG") {
+        return PathBuf::from(p);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("dmn")

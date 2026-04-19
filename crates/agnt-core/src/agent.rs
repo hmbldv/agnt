@@ -662,7 +662,7 @@ impl<B: LlmBackend> Agent<B> {
             drop(_backend_span);
 
             // Extract tool_calls before push to avoid cloning the Vec<ToolCall>.
-            let calls = resp.tool_calls.take();
+            let calls = resp.tool_calls.clone();
             let has_calls = calls.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
             self.persist(&resp);
             let resp_idx = self.messages.len();

@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_backend(config: &Config) -> anyhow::Result<Backend> {
-    let backend = match config.provider.as_str() {
+    let mut backend = match config.provider.as_str() {
         "ollama" => Backend::ollama(&config.model),
         "openai" => {
             let key = config.api_key.clone()
@@ -109,5 +109,8 @@ fn build_backend(config: &Config) -> anyhow::Result<Backend> {
         }
         other => anyhow::bail!("unknown provider: {}", other),
     };
+    if let Some(ref url) = config.base_url {
+        backend.base_url = url.clone();
+    }
     Ok(backend)
 }
