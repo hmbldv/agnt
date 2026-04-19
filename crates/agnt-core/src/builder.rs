@@ -36,6 +36,7 @@ pub struct AgentBuilder<B: LlmBackend> {
     max_steps: Option<usize>,
     max_window: Option<usize>,
     max_tool_result_bytes: Option<usize>,
+    max_tool_output_chars: Option<usize>,
     store: Option<Arc<dyn MessageStore>>,
     session: Option<String>,
     observer: Option<Arc<dyn Observer>>,
@@ -54,6 +55,7 @@ impl<B: LlmBackend> AgentBuilder<B> {
             max_steps: None,
             max_window: None,
             max_tool_result_bytes: None,
+            max_tool_output_chars: None,
             store: None,
             session: None,
             observer: None,
@@ -95,6 +97,12 @@ impl<B: LlmBackend> AgentBuilder<B> {
     /// Cap on raw bytes per tool result before envelope framing. Default: 64KB.
     pub fn max_tool_result_bytes(mut self, n: usize) -> Self {
         self.max_tool_result_bytes = Some(n);
+        self
+    }
+
+    /// Cap on Unicode characters per tool result. Default: 8 000.
+    pub fn max_tool_output_chars(mut self, n: usize) -> Self {
+        self.max_tool_output_chars = Some(n);
         self
     }
 
@@ -144,6 +152,9 @@ impl<B: LlmBackend> AgentBuilder<B> {
         }
         if let Some(n) = self.max_tool_result_bytes {
             agent.max_tool_result_bytes = n;
+        }
+        if let Some(n) = self.max_tool_output_chars {
+            agent.max_tool_output_chars = n;
         }
         if let Some(obs) = self.observer {
             agent.observer = obs;

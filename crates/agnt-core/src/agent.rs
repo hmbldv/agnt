@@ -113,6 +113,12 @@ pub struct Agent<B: LlmBackend> {
     /// Maximum raw bytes per tool result, truncated before `<tool_output>`
     /// framing. Defaults to [`DEFAULT_MAX_TOOL_RESULT_BYTES`] (64KB).
     pub max_tool_result_bytes: usize,
+    /// Maximum Unicode characters per tool result. Applied before the
+    /// byte-based [`Agent::max_tool_result_bytes`] cap. When exceeded, the
+    /// output is sliced at this character boundary and a notice
+    /// `"\n... [truncated: N chars, showing first M]"` is appended.
+    /// Defaults to 8 000.
+    pub max_tool_output_chars: usize,
     /// Per-tool quotas (v0.3 M3). Lookup key is `Tool::name()`. Unset tools
     /// have no quota (unlimited).
     ///
@@ -190,6 +196,7 @@ impl<B: LlmBackend> Agent<B> {
             max_steps: 10,
             max_window: 40,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
+            max_tool_output_chars: 8_000,
             tool_quotas: HashMap::new(),
             max_step_duration: None,
             store: None,
@@ -273,27 +280,53 @@ impl<B: LlmBackend> Agent<B> {
         }
     }
 
-    /// Wrap a tool result in the `<tool_output>` envelope, truncating raw
-    /// bytes to [`Agent::max_tool_result_bytes`] first so prompt-injection
-    /// payloads can't blow out the context window.
+    /// Wrap a tool result in the `<tool_output>` envelope, applying
+    /// char-based and byte-based truncation before framing so oversized
+    /// outputs can't blow out the context window.
     fn frame_tool_output(&self, name: &str, id: &str, raw: &str) -> String {
-        let cap = self.max_tool_result_bytes;
-        let (body, truncated) = if raw.len() > cap {
-            // Truncate on a valid UTF-8 boundary.
-            let mut end = cap;
-            while end > 0 && !raw.is_char_boundary(end) {
+        let byte_cap = self.max_tool_result_bytes;
+        let char_cap = self.max_tool_output_chars;
+        let original_len = raw.len();
+
+        // Char-based truncation: applied first and appends a human-readable
+        // notice so the model knows the output was cut.
+        let char_buf;
+        let working: &str = {
+            let char_count = raw.chars().count();
+            if char_count > char_cap {
+                let end = raw
+                    .char_indices()
+                    .nth(char_cap)
+                    .map(|(i, _)| i)
+                    .unwrap_or(raw.len());
+                char_buf = format!(
+                    "{}\n... [truncated: {} chars, showing first {}]",
+                    &raw[..end], char_count, char_cap
+                );
+                &char_buf
+            } else {
+                raw
+            }
+        };
+
+        // Byte-based truncation: safety net for non-ASCII content that
+        // passed the char check but is still large in bytes.
+        let (body, truncated) = if working.len() > byte_cap {
+            let mut end = byte_cap;
+            while end > 0 && !working.is_char_boundary(end) {
                 end -= 1;
             }
-            (&raw[..end], true)
+            (&working[..end], true)
         } else {
-            (raw, false)
+            (working, false)
         };
+
         if truncated {
             format!(
                 "<tool_output name=\"{}\" id=\"{}\" truncated=\"true\" raw_bytes=\"{}\">{}</tool_output>",
                 escape_attr(name),
                 escape_attr(id),
-                raw.len(),
+                original_len,
                 body
             )
         } else {
@@ -875,6 +908,27 @@ mod tests {
         let framed = a.frame_tool_output("t", "id", "é中");
         // truncated, and must not panic mid-char
         assert!(framed.contains("truncated=\"true\""));
+    }
+
+    #[test]
+    fn frame_tool_output_truncates_by_chars() {
+        #[allow(deprecated)]
+        let mut a = Agent::new(MockBackend, "sys");
+        a.max_tool_output_chars = 5;
+        let input = "hello world this is long";
+        let framed = a.frame_tool_output("t", "id", input);
+        // Body must contain the 5-char prefix + truncation notice
+        assert!(framed.contains("hello"), "kept prefix");
+        assert!(framed.contains("[truncated:"), "has truncation notice");
+        assert!(
+            framed.contains(&format!("showing first {}", 5)),
+            "notice cites limit"
+        );
+        assert!(
+            framed.contains(&format!("{} chars", input.chars().count())),
+            "notice cites original length"
+        );
+        assert!(!framed.contains("world"), "truncated tail absent");
     }
 
     #[test]
