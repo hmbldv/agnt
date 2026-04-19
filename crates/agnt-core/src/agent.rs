@@ -617,7 +617,7 @@ impl<B: LlmBackend> Agent<B> {
             )
             .entered();
 
-            let mut resp = if use_on_token {
+            let resp = if use_on_token {
                 // Temporarily move the callback out so we can borrow the
                 // backend and self.messages at the same time.
                 let mut cb = self.on_token.take().expect("on_token is_some");
@@ -661,7 +661,6 @@ impl<B: LlmBackend> Agent<B> {
             };
             drop(_backend_span);
 
-            // Extract tool_calls before push to avoid cloning the Vec<ToolCall>.
             let calls = resp.tool_calls.clone();
             let has_calls = calls.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
             self.persist(&resp);
