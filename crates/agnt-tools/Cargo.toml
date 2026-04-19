@@ -1,6 +1,6 @@
 [package]
 name = "agnt-tools"
-version = "0.3.1"
+version = "0.3.3"
 edition = "2021"
 rust-version = "1.75"
 authors = ["doop"]
@@ -45,3 +45,6 @@ shell-words = "1.1"
 url = "2.5"
 # S6: file locking for EditFile TOCTOU fix
 fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
