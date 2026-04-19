@@ -39,6 +39,11 @@ pub struct Backend {
     /// Optional dedicated ureq Agent. When `None`, the process-wide shared
     /// Agent (with default timeouts) is used.
     agent: Option<Arc<ureq::Agent>>,
+    /// When `true`, tool-result messages (`role: "tool"`) are re-sent as
+    /// `role: "user"` messages. Required for models (e.g. Gemma 4 on vllm)
+    /// whose chat template embeds tool responses inside the model turn and
+    /// closes it, leaving no generation prompt for the follow-up turn.
+    pub tool_result_as_user: bool,
 }
 
 impl std::fmt::Debug for Backend {
@@ -68,6 +73,7 @@ impl Backend {
             api_key: None,
             model: model.into(),
             agent: None,
+            tool_result_as_user: false,
         }
     }
     /// Create a backend for OpenAI's API.
@@ -78,6 +84,7 @@ impl Backend {
             api_key: Some(api_key.into()),
             model: model.into(),
             agent: None,
+            tool_result_as_user: false,
         }
     }
     /// Create a backend for Anthropic's native API.
@@ -92,6 +99,7 @@ impl Backend {
             api_key: Some(api_key.into()),
             model: model.into(),
             agent: None,
+            tool_result_as_user: false,
         }
     }
 
@@ -163,7 +171,7 @@ impl Backend {
         sink: Option<&mut dyn FnMut(&str)>,
     ) -> Result<Message, String> {
         let url = format!("{}/chat/completions", self.base_url);
-        let mut body = json!({ "model": self.model, "messages": to_openai_messages(messages) });
+        let mut body = json!({ "model": self.model, "messages": to_openai_messages(messages, self.tool_result_as_user) });
         if let Some(arr) = tools.as_array() {
             if !arr.is_empty() {
                 body["tools"] = tools.clone();
@@ -374,9 +382,19 @@ where
 /// it requires the field to be a string even when the response contains only
 /// tool_calls. Same constraint applies to `tool` role messages whose result
 /// content may be absent.
-fn to_openai_messages(msgs: &[Message]) -> Vec<Value> {
+fn to_openai_messages(msgs: &[Message], tool_result_as_user: bool) -> Vec<Value> {
     msgs.iter()
         .map(|m| {
+            // Some models (e.g. Gemma 4 on vllm) embed tool results inside the
+            // model turn and close it, leaving no generation prompt for the
+            // follow-up. Sending them as user messages instead produces the
+            // correct <|turn>user ... <|turn>model sequence.
+            if tool_result_as_user && m.role == "tool" {
+                return json!({
+                    "role": "user",
+                    "content": m.content.clone().unwrap_or_default(),
+                });
+            }
             let mut obj = serde_json::to_value(m).unwrap_or(json!({}));
             if (m.role == "assistant" || m.role == "tool")
                 && (obj.get("content").is_none() || obj["content"].is_null())
@@ -904,7 +922,7 @@ mod tests {
                 name: None,
             },
         ];
-        let out = to_openai_messages(&msgs);
+        let out = to_openai_messages(&msgs, false);
         // user message: content should be present as-is
         assert_eq!(out[0]["content"], json!("hi"));
         // assistant with tool_calls, no text: content must be "" not null/missing

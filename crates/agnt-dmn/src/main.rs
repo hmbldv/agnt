@@ -112,5 +112,6 @@ fn build_backend(config: &Config) -> anyhow::Result<Backend> {
     if let Some(ref url) = config.base_url {
         backend.base_url = url.clone();
     }
+    backend.tool_result_as_user = config.tool_result_as_user;
     Ok(backend)
 }

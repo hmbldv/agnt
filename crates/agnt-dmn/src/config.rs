@@ -21,6 +21,12 @@ pub struct Config {
     pub store_path: Option<String>,
     #[serde(default)]
     pub exposes: Vec<String>,
+    /// Remap tool-result messages to `role: "user"` before sending to the
+    /// backend. Required for Gemma 4 on vllm whose chat template embeds tool
+    /// responses inside the model turn and leaves no follow-up generation
+    /// prompt. Defaults to `false` (standard OpenAI tool-role behaviour).
+    #[serde(default)]
+    pub tool_result_as_user: bool,
 }
 
 fn default_host() -> String { "127.0.0.1".into() }
@@ -38,6 +44,7 @@ impl Default for Config {
             base_url: None,
             store_path: None,
             exposes: vec![],
+            tool_result_as_user: false,
         }
     }
 }
