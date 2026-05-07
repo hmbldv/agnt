@@ -39,6 +39,7 @@
 //! row in the SQLite store. The old session's history stays on disk for
 //! offline analysis.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::harmony::HarmonyStripper;
+use crate::prompt;
 
 use voicectl_core::config::ConversationConfig;
 use agnt_core::wire::{AgentDispatch, AgentReply, AgentToken, RequestId};
@@ -431,8 +433,32 @@ impl AgentHandle {
         let backend =
             agnt::Backend::openai(&cfg.backend.model, &api_key).with_base_url(&cfg.backend.url);
 
-        // System prompt — try the configured path, then the fallback.
-        let system_prompt = read_prompt(cfg)?;
+        // System prompt — try RASP definition dir first (layers 1+2 only;
+        // layer 3 is injected at dispatch time). Fall back to static files.
+        let system_prompt = if let Some(dir) = &cfg.prompt.definition_dir {
+            prompt::build_static_prompt(dir, &cfg.agent.name)
+                .unwrap_or_else(|| {
+                    warn!(
+                        agent = %cfg.agent.name,
+                        definition_dir = %dir.display(),
+                        "RASP definition dir set but static prompt build failed; \
+                         falling back to system_file"
+                    );
+                    String::new()
+                })
+        } else {
+            String::new()
+        };
+        let system_prompt = if !system_prompt.is_empty() {
+            info!(
+                agent = %cfg.agent.name,
+                prompt_tokens = system_prompt.split_whitespace().count(),
+                "RASP static prompt loaded"
+            );
+            system_prompt
+        } else {
+            read_prompt(cfg)?
+        };
 
         let (observer, tool_log) = ToolObserver::new();
 
@@ -581,10 +607,15 @@ fn build_system_tools_config(cfg: &AgentBridgeConfig) -> agnt_bridge_tools::Syst
     if let Some(apps) = &cfg.tools.computer_use_safe_focus_apps {
         sc.computer_use_safety.safe_focus_apps = apps.clone();
     }
-    // vision_url / vision_model config fields are no longer used:
-    // look_at_screen dispatches over NATS to vznd instead of calling
-    // a model directly. The fields are retained in the TOML schema for
-    // backward-compat but silently ignored here.
+    // vision_url / vision_model are retained for backward-compat but ignored.
+    // vision_localize_model / vision_analyze_model wire per-pass model overrides
+    // into LookAtScreen → vznd. None = vznd uses its own configured default.
+    if let Some(m) = &cfg.tools.vision_localize_model {
+        sc.vision_localize_model = Some(m.clone());
+    }
+    if let Some(m) = &cfg.tools.vision_analyze_model {
+        sc.vision_analyze_model = Some(m.clone());
+    }
     sc
 }
 
@@ -614,6 +645,20 @@ fn read_prompt(cfg: &AgentBridgeConfig) -> anyhow::Result<String> {
     Ok(String::new())
 }
 
+// ── RASP live-context config ─────────────────────────────────────────────────
+
+/// When set on `BridgeContext`, each dispatch gets a memctl recall block
+/// prepended to the user message before the agent sees it.
+#[derive(Debug, Clone)]
+pub struct RaspConfig {
+    /// Path to the agent definitions directory (agents/<name>/).
+    pub agents_dir: PathBuf,
+    /// Agent name — used as the subdirectory and memctl query prefix.
+    pub agent_name: String,
+    /// Path to the memctl binary.
+    pub memctl_bin: PathBuf,
+}
+
 // ── Bridge runtime context ───────────────────────────────────────────────────
 
 pub struct BridgeContext {
@@ -622,15 +667,23 @@ pub struct BridgeContext {
     pub agent: AgentHandle,
     /// In-memory session state, rotated lazily on dispatch.
     pub session: Mutex<SessionState>,
+    /// When set, each dispatch gets a live-context block from memctl.
+    pub rasp: Option<RaspConfig>,
 }
 
 impl BridgeContext {
-    pub fn new(cfg: AgentBridgeConfig, nats: NatsClient, agent: AgentHandle) -> Self {
+    pub fn new(
+        cfg: AgentBridgeConfig,
+        nats: NatsClient,
+        agent: AgentHandle,
+        rasp: Option<RaspConfig>,
+    ) -> Self {
         Self {
             cfg,
             nats,
             agent,
             session: Mutex::new(SessionState::new()),
+            rasp,
         }
     }
 
@@ -751,9 +804,18 @@ impl BridgeContext {
         let runner = Arc::clone(&self.agent.runner);
         let user_input = dispatch.user_input.clone();
         let max_history_turns = self.cfg.conversation.max_history_turns;
+        let rasp = self.rasp.clone();
         let outcome = tokio::task::spawn_blocking(move || {
+            // RASP layer 3: fetch live context from memctl and prepend to
+            // user_input. Runs inside spawn_blocking so the blocking process
+            // call doesn't stall the async runtime. Falls back gracefully
+            // (passes user_input unchanged) if memctl is unavailable.
+            let context = rasp.as_ref().and_then(|r| {
+                prompt::recall_context(&r.memctl_bin, &r.agent_name, &user_input)
+            });
+            let augmented = prompt::augment_user_input(&user_input, context.as_deref());
             runner.run_step(StepInputs {
-                user_input: &user_input,
+                user_input: &augmented,
                 on_token: token_sink,
                 session: directive,
                 max_history_turns,

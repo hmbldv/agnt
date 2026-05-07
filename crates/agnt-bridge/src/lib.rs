@@ -27,6 +27,7 @@
 pub mod config;
 pub mod dispatch;
 pub mod harmony;
+pub mod prompt;
 
 pub use config::AgentBridgeConfig;
-pub use dispatch::{AgentHandle, BridgeContext, ReplyOutcome};
+pub use dispatch::{AgentHandle, BridgeContext, RaspConfig, ReplyOutcome};

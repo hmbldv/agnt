@@ -28,7 +28,7 @@ use clap::Parser;
 use futures::StreamExt;
 use tracing::{info, warn};
 
-use agnt_bridge::{AgentBridgeConfig, AgentHandle, BridgeContext};
+use agnt_bridge::{AgentBridgeConfig, AgentHandle, BridgeContext, RaspConfig};
 use agnt_core::wire::RequestId;
 use voicectl_core::config::BusConfig;
 use voicectl_core::events::{AgentCancel, AgentDispatch};
@@ -112,7 +112,28 @@ async fn main() -> anyhow::Result<()> {
         "subscribed"
     );
 
-    let ctx = Arc::new(BridgeContext::new(cfg, bus_arc.client.clone(), agent));
+    // Build RASP config when a definition_dir is configured. The memctl bin
+    // path comes from the tools section (same binary as the memctl_recall tool).
+    let rasp = cfg.prompt.definition_dir.as_ref().map(|dir| {
+        let memctl_bin = cfg
+            .tools
+            .memctl_bin
+            .clone()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local/bin/memctl"));
+        info!(
+            agent = %cfg.agent.name,
+            definition_dir = %dir.display(),
+            memctl = %memctl_bin.display(),
+            "RASP live-context enabled"
+        );
+        RaspConfig {
+            agents_dir: dir.clone(),
+            agent_name: cfg.agent.name.clone(),
+            memctl_bin,
+        }
+    });
+
+    let ctx = Arc::new(BridgeContext::new(cfg, bus_arc.client.clone(), agent, rasp));
 
     // Track the currently-in-flight request so a cancel can publish a
     // synthetic reply on its reply_to subject. v0 = at most one in-flight.

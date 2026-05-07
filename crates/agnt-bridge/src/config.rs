@@ -71,6 +71,14 @@ pub struct PromptSection {
     /// prompts when an individual agent hasn't written its own yet.
     #[serde(default)]
     pub fallback_file: Option<PathBuf>,
+    /// Root of the RASP agent-definition tree (see `agents/_schema/agent.toml.md`).
+    /// When set, the bridge builds the system prompt from
+    /// `<definition_dir>/<agent_name>/{agent.toml,system.md,principles.md}`
+    /// and augments each dispatch with a live memctl recall context block.
+    /// `system_file` / `fallback_file` are used only as a fallback when the
+    /// definition dir is absent or the named agent directory is missing.
+    #[serde(default)]
+    pub definition_dir: Option<PathBuf>,
 }
 
 /// Tool surface. `vault_root` is the structural sandbox passed to every
@@ -235,6 +243,9 @@ impl AgentBridgeConfig {
         }
         self.prompt.system_file = expand_tilde(&self.prompt.system_file);
         if let Some(p) = self.prompt.fallback_file.as_mut() {
+            *p = expand_tilde(p);
+        }
+        if let Some(p) = self.prompt.definition_dir.as_mut() {
             *p = expand_tilde(p);
         }
         if let Some(s) = self.store.as_mut() {

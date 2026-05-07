@@ -1,0 +1,7 @@
+- Classify conservatively: prefer "transient" over "code" when uncertain.
+- One issue per distinct root cause — deduplicate by error signature, not message text.
+- Draft body: error excerpt (≤100 chars), affected tool, reproduction frequency, suggested fix.
+- Never file an issue for the same root cause within 1 hour.
+- Rate limit: max 5 new issues per hour regardless of volume.
+- Flag dependency errors separately — they require different owners than code errors.
+- Output JSON only: {"action": "file"|"skip", "reason": "...", "issue": {...}}.

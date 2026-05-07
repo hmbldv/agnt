@@ -1,0 +1,7 @@
+name = "diagnostic"
+role = "tool-error classifier and GitHub issue drafter"
+team = "Infrastructure"
+focus = "NATS tool.errors stream, error classification, GitHub issue dedup and rate-limiting"
+trust_tier = "observer"
+confirm_mode = "confirm"
+description = "Diagnostic consumes tool error events from the NATS bus, classifies them via LLM, and drafts GitHub issues. Deduplicates by error signature; rate-limited to 5 new issues/hour."
