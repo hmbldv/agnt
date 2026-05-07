@@ -477,10 +477,14 @@ impl AgentHandle {
                         agnt_bridge_tools::build_tool(other, &system_cfg, dispatch_bus.clone())
                     {
                         builder = builder.tool(tool);
-                    } else if other == "dispatch_agent" && dispatch_bus.is_none() {
+                    } else if matches!(other, "dispatch_agent" | "look_at_screen")
+                        && dispatch_bus.is_none()
+                    {
                         warn!(
-                            "config enables 'dispatch_agent' but no NATS bus was \
-                             provided to AgentHandle::from_config — tool omitted"
+                            tool = %other,
+                            "config enables '{}' but no NATS bus was provided to \
+                             AgentHandle::from_config — tool omitted",
+                            other
                         );
                     } else {
                         warn!(
@@ -577,12 +581,10 @@ fn build_system_tools_config(cfg: &AgentBridgeConfig) -> agnt_bridge_tools::Syst
     if let Some(apps) = &cfg.tools.computer_use_safe_focus_apps {
         sc.computer_use_safety.safe_focus_apps = apps.clone();
     }
-    if let Some(url) = &cfg.tools.vision_url {
-        sc.vision_url = url.clone();
-    }
-    if let Some(m) = &cfg.tools.vision_model {
-        sc.vision_model = m.clone();
-    }
+    // vision_url / vision_model config fields are no longer used:
+    // look_at_screen dispatches over NATS to vznd instead of calling
+    // a model directly. The fields are retained in the TOML schema for
+    // backward-compat but silently ignored here.
     sc
 }
 

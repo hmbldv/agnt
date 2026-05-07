@@ -21,6 +21,9 @@ agnt-core = { path = "../agnt-core" }
 voicectl-core = { path = "../../../../voicectl/main/crates/voicectl-core" }
 voicectl-net = { path = "../../../../voicectl/main/crates/voicectl-net" }
 
+# vzn vision-dispatch wire types
+vzn-core = { path = "../../../../vzn/main/crates/vzn-core" }
+
 # core data
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -90,12 +90,6 @@ pub struct SystemToolsConfig {
     /// `SafetyMode::Confirm` — every destructive call publishes a
     /// confirmation request and waits for explicit approval.
     pub computer_use_safety: SafetyPolicy,
-    /// Vision LLM endpoint (OpenAI-compatible chat-completions URL).
-    /// Used by `look_at_screen`. Default: qwen-vl on lnx-rig.
-    pub vision_url: String,
-    /// Model name advertised by the vision endpoint.
-    /// Default: `qwen2-vl-2b`.
-    pub vision_model: String,
 }
 
 impl Default for SystemToolsConfig {
@@ -106,8 +100,6 @@ impl Default for SystemToolsConfig {
             memctl_bin: home.join(".local/bin/memctl"),
             cache_dir: home.join(".cache/voicectl"),
             computer_use_safety: SafetyPolicy::default(),
-            vision_url: vision::DEFAULT_VISION_URL.into(),
-            vision_model: vision::DEFAULT_VISION_MODEL.into(),
         }
     }
 }
@@ -156,11 +148,17 @@ pub fn build_tool(
             .map(|bus| Box::new(Scroll::new(bus, Arc::clone(&policy))) as Box<dyn agnt::Tool>),
         "focus_window" => dispatch_bus
             .map(|bus| Box::new(FocusWindow::new(bus, Arc::clone(&policy))) as Box<dyn agnt::Tool>),
-        "look_at_screen" => Some(Box::new(LookAtScreen::new(VisionConfig {
-            url: cfg.vision_url.clone(),
-            model: cfg.vision_model.clone(),
-            cache_dir: cfg.cache_dir.clone(),
-        }))),
+        // look_at_screen dispatches over NATS — requires a bus.
+        "look_at_screen" => dispatch_bus
+            .clone()
+            .map(|bus| {
+                Box::new(LookAtScreen::new(
+                    VisionConfig {
+                        cache_dir: cfg.cache_dir.clone(),
+                    },
+                    bus,
+                )) as Box<dyn agnt::Tool>
+            }),
         _ => None,
     }
 }
@@ -190,7 +188,7 @@ mod tests {
     #[test]
     fn all_tools_constants_match_build_tool() {
         let cfg = SystemToolsConfig::default();
-        // Bus-dependent tools — confirm publish channel or agent dispatch.
+        // Bus-dependent tools — confirm publish channel, agent dispatch, or vzn vision.
         let needs_bus = [
             "dispatch_agent",
             "click",
@@ -198,6 +196,7 @@ mod tests {
             "key_combo",
             "scroll",
             "focus_window",
+            "look_at_screen",
         ];
         for name in ALL_TOOLS {
             if needs_bus.contains(name) {
@@ -211,9 +210,16 @@ mod tests {
     }
 
     #[test]
-    fn destructive_tools_require_a_bus() {
+    fn bus_required_tools_refuse_without_bus() {
         let cfg = SystemToolsConfig::default();
-        for name in ["click", "type_text", "key_combo", "scroll", "focus_window"] {
+        for name in [
+            "click",
+            "type_text",
+            "key_combo",
+            "scroll",
+            "focus_window",
+            "look_at_screen",
+        ] {
             assert!(
                 build_tool(name, &cfg, None).is_none(),
                 "{name} should refuse to build without a Bus"

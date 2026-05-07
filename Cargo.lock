@@ -69,6 +69,7 @@ dependencies = [
  "uuid",
  "voicectl-core",
  "voicectl-net",
+ "vzn-core",
 ]
 
 [[package]]
@@ -3007,6 +3008,16 @@ dependencies = [
  "tracing",
  "uuid",
  "voicectl-core",
+]
+
+[[package]]
+name = "vzn-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
