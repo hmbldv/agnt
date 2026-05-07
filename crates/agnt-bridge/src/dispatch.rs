@@ -90,6 +90,15 @@ impl agnt::Observer for ToolObserver {
             g.push(call.function.name.clone());
         }
     }
+
+    fn on_step_usage(&self, usage: agnt::UsageStats) {
+        tracing::debug!(
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            total_tokens = usage.total(),
+            "step token usage"
+        );
+    }
 }
 
 // ── Session state ───────────────────────────────────────────────────────────
@@ -498,6 +507,40 @@ impl AgentHandle {
                     };
                     builder = builder.tool(tool);
                 }
+                "list_dir" => {
+                    let tool: Box<dyn agnt::Tool> = match &sandbox {
+                        Some(s) => Box::new(agnt::builtins::ListDir::with_sandbox(Arc::clone(s))),
+                        None => Box::new(agnt::builtins::ListDir::new()),
+                    };
+                    builder = builder.tool(tool);
+                }
+                "glob" => {
+                    let tool: Box<dyn agnt::Tool> = match &sandbox {
+                        Some(s) => Box::new(agnt::builtins::Glob::with_sandbox(Arc::clone(s))),
+                        None => Box::new(agnt::builtins::Glob::new()),
+                    };
+                    builder = builder.tool(tool);
+                }
+                "vault_recent" => {
+                    match &cfg.tools.vault_root {
+                        Some(root) => {
+                            builder = builder.tool(Box::new(
+                                agnt_bridge_tools::VaultRecent::new(root.clone()),
+                            ));
+                        }
+                        None => warn!("vault_recent requires vault_root — skipping"),
+                    }
+                }
+                "vault_find" => {
+                    match &cfg.tools.vault_root {
+                        Some(root) => {
+                            builder = builder.tool(Box::new(
+                                agnt_bridge_tools::VaultFind::new(root.clone()),
+                            ));
+                        }
+                        None => warn!("vault_find requires vault_root — skipping"),
+                    }
+                }
                 other => {
                     if let Some(tool) =
                         agnt_bridge_tools::build_tool(other, &system_cfg, dispatch_bus.clone())
@@ -563,7 +606,7 @@ impl AgentHandle {
 
 /// Translate the bridge's `[tools]` section into a
 /// [`agnt_bridge_tools::SystemToolsConfig`]. Unset fields fall back to the
-/// crate's defaults (SearXNG at lnx-rig, memctl at `~/.local/bin/memctl`,
+/// crate's defaults (SearXNG at localhost:8888, memctl at `~/.local/bin/memctl`,
 /// cache dir at `~/.cache/voicectl`, `SafetyMode::Confirm`, etc.).
 ///
 /// The safety mode parsing is permissive: an unknown value warn-logs and

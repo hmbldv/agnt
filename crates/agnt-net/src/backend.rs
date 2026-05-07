@@ -183,8 +183,7 @@ impl Backend {
 
         // Serialize the body exactly once before entering the retry loop so
         // we don't clone a fresh JSON `Value` on every attempt.
-        let body_bytes =
-            serde_json::to_vec(&body).map_err(|e| format!("encode body: {}", e))?;
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode body: {}", e))?;
         let body_slice: &[u8] = &body_bytes;
 
         let resp = with_retry(5, || {
@@ -197,12 +196,19 @@ impl Backend {
             parse_openai_stream(resp.into_reader(), sink)
         } else {
             let v: Value = resp.into_json().map_err(|e| format!("decode: {}", e))?;
-            let msg = v
+            let msg_val = v
                 .get("choices")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("message"))
                 .ok_or_else(|| format!("no message: {}", v))?;
-            serde_json::from_value(msg.clone()).map_err(|e| format!("parse: {}", e))
+            let mut msg: Message =
+                serde_json::from_value(msg_val.clone()).map_err(|e| format!("parse: {}", e))?;
+            msg.usage = v.get("usage").and_then(|u| {
+                let p = u.get("prompt_tokens").and_then(|v| v.as_u64())? as u32;
+                let c = u.get("completion_tokens").and_then(|v| v.as_u64())? as u32;
+                Some(agnt_core::UsageStats { prompt_tokens: p, completion_tokens: c })
+            });
+            Ok(msg)
         }
     }
 
@@ -242,8 +248,7 @@ impl Backend {
             body["stream"] = Value::Bool(true);
         }
 
-        let body_bytes =
-            serde_json::to_vec(&body).map_err(|e| format!("encode body: {}", e))?;
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("encode body: {}", e))?;
         let body_slice: &[u8] = &body_bytes;
 
         let resp = with_retry(5, || {
@@ -256,7 +261,13 @@ impl Backend {
             parse_anthropic_stream(resp.into_reader(), sink)
         } else {
             let v: Value = resp.into_json().map_err(|e| format!("decode: {}", e))?;
-            from_anthropic_response(&v)
+            let mut msg = from_anthropic_response(&v)?;
+            msg.usage = v.get("usage").and_then(|u| {
+                let p = u.get("input_tokens").and_then(|v| v.as_u64())? as u32;
+                let c = u.get("output_tokens").and_then(|v| v.as_u64())? as u32;
+                Some(agnt_core::UsageStats { prompt_tokens: p, completion_tokens: c })
+            });
+            Ok(msg)
         }
     }
 }
@@ -367,7 +378,9 @@ where
                     base_delay = (base_delay * 2).min(8000);
                     continue;
                 }
-                return Err(redact_secrets(last_err.as_deref().unwrap_or("transport: unknown")));
+                return Err(redact_secrets(
+                    last_err.as_deref().unwrap_or("transport: unknown"),
+                ));
             }
         }
     }
@@ -466,9 +479,7 @@ fn to_anthropic_messages(msgs: &[Message]) -> (String, Vec<Value>) {
                         } else {
                             let existing = last["content"].clone();
                             let mut arr: Vec<Value> = Vec::new();
-                            if existing.is_string()
-                                && !existing.as_str().unwrap_or("").is_empty()
-                            {
+                            if existing.is_string() && !existing.as_str().unwrap_or("").is_empty() {
                                 arr.push(json!({"type":"text","text": existing}));
                             }
                             arr.push(block);
@@ -533,6 +544,7 @@ fn from_anthropic_response(v: &Value) -> Result<Message, String> {
         },
         tool_call_id: None,
         name: None,
+        usage: None,
     })
 }
 
@@ -575,10 +587,7 @@ pub fn _fuzz_parse_anthropic_stream(bytes: &[u8]) -> Result<Message, String> {
     parse_anthropic_stream(bytes, &mut sink)
 }
 
-fn parse_openai_stream<R: Read>(
-    resp: R,
-    sink: &mut dyn FnMut(&str),
-) -> Result<Message, String> {
+fn parse_openai_stream<R: Read>(resp: R, sink: &mut dyn FnMut(&str)) -> Result<Message, String> {
     // Generic over `R: Read` so tests can feed a `&[u8]` and production can
     // pass `ureq::Response::into_reader()`.
     let mut reader = BufReader::new(resp);
@@ -681,13 +690,11 @@ fn parse_openai_stream<R: Read>(
         },
         tool_call_id: None,
         name: None,
+        usage: None,
     })
 }
 
-fn parse_anthropic_stream<R: Read>(
-    resp: R,
-    sink: &mut dyn FnMut(&str),
-) -> Result<Message, String> {
+fn parse_anthropic_stream<R: Read>(resp: R, sink: &mut dyn FnMut(&str)) -> Result<Message, String> {
     let mut reader = BufReader::new(resp);
     let mut text = String::new();
     let mut blocks: Vec<(String, String, String, String)> = Vec::new();
@@ -738,8 +745,7 @@ fn parse_anthropic_stream<R: Read>(
                     .unwrap_or("");
                 match dtype {
                     "text_delta" => {
-                        if let Some(t) =
-                            delta.and_then(|d| d.get("text")).and_then(|t| t.as_str())
+                        if let Some(t) = delta.and_then(|d| d.get("text")).and_then(|t| t.as_str())
                         {
                             text.push_str(t);
                             sink(t);
@@ -771,11 +777,7 @@ fn parse_anthropic_stream<R: Read>(
                 call_type: "function".into(),
                 function: FunctionCall {
                     name,
-                    arguments: if args.is_empty() {
-                        "{}".into()
-                    } else {
-                        args
-                    },
+                    arguments: if args.is_empty() { "{}".into() } else { args },
                 },
             });
         }
@@ -791,6 +793,7 @@ fn parse_anthropic_stream<R: Read>(
         },
         tool_call_id: None,
         name: None,
+        usage: None,
     })
 }
 
@@ -899,6 +902,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             },
             Message {
                 role: "assistant".into(),
@@ -913,6 +917,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 name: None,
+                usage: None,
             },
             Message {
                 role: "tool".into(),
@@ -920,15 +925,24 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("call_1".into()),
                 name: None,
+                usage: None,
             },
         ];
         let out = to_openai_messages(&msgs, false);
         // user message: content should be present as-is
         assert_eq!(out[0]["content"], json!("hi"));
         // assistant with tool_calls, no text: content must be "" not null/missing
-        assert_eq!(out[1]["content"], json!(""), "assistant content must be empty string, not null");
+        assert_eq!(
+            out[1]["content"],
+            json!(""),
+            "assistant content must be empty string, not null"
+        );
         // tool message with no content: must be "" not null/missing
-        assert_eq!(out[2]["content"], json!(""), "tool content must be empty string, not null");
+        assert_eq!(
+            out[2]["content"],
+            json!(""),
+            "tool content must be empty string, not null"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //! Users who want to fan out to multiple destinations can wrap their
 //! concerns in a single composite `Observer` impl.
 
-use crate::message::{Message, ToolCall};
+use crate::message::{Message, ToolCall, UsageStats};
 
 /// Result of a tool execution, passed to observers after dispatch.
 #[derive(Debug, Clone)]
@@ -67,6 +67,11 @@ pub trait Observer: Send + Sync {
 
     /// Called if the step loop errors out before producing a final message.
     fn on_step_error(&self, _error: &str) {}
+
+    /// Called at step completion (success or error) with cumulative token usage
+    /// for all inference turns in this step. Tokens are zero when the backend
+    /// didn't surface usage data (e.g. streaming without a usage event).
+    fn on_step_usage(&self, _usage: UsageStats) {}
 
     /// v0.3 C2 — policy gate fired BEFORE every tool dispatch.
     ///

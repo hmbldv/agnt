@@ -62,12 +62,12 @@
 //! current threat model, and the roadmap.
 
 // Core types and traits — always re-exported.
+pub use agnt_core::agent::ToolQuota;
 pub use agnt_core::{
     Agent, AgentBuilder, BackendError, Disposition, ErasedAdapter, FunctionCall, LlmBackend,
     Message, MessageStore, Observer, Registry, StoreError, Tool, ToolCall, ToolLog, ToolResult,
-    TypedTool,
+    TypedTool, UsageStats,
 };
-pub use agnt_core::agent::ToolQuota;
 
 /// Alias the agent loop module for explicit access.
 pub mod agent {

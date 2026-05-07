@@ -27,7 +27,7 @@
 //! the envelope is applied.
 
 use crate::backend_trait::LlmBackend;
-use crate::message::{Message, ToolCall};
+use crate::message::{Message, ToolCall, UsageStats};
 use crate::observer::{Disposition, NoOpObserver, Observer, StepContext, ToolResult};
 use crate::store_trait::{MessageStore, ToolLog};
 use crate::tool::Registry;
@@ -104,7 +104,7 @@ pub struct Agent<B: LlmBackend> {
     pub messages: Vec<Message>,
     /// Tool registry — tools the model may call.
     pub tools: Registry,
-    /// Maximum number of inference turns per [`Agent::step`] call. Defaults to 10.
+    /// Maximum number of inference turns per [`Agent::step`] call. Defaults to 25.
     pub max_steps: usize,
     /// Maximum messages sent to the backend per turn. Truncation advances to
     /// a user-message boundary so tool_use/tool_result pairs are never split.
@@ -191,9 +191,10 @@ impl<B: LlmBackend> Agent<B> {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             }],
             tools: Registry::new(),
-            max_steps: 10,
+            max_steps: 25,
             max_window: 40,
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
             max_tool_output_chars: 8_000,
@@ -301,7 +302,9 @@ impl<B: LlmBackend> Agent<B> {
                     .unwrap_or(raw.len());
                 char_buf = format!(
                     "{}\n... [truncated: {} chars, showing first {}]",
-                    &raw[..end], char_count, char_cap
+                    &raw[..end],
+                    char_count,
+                    char_cap
                 );
                 &char_buf
             } else {
@@ -377,9 +380,7 @@ impl<B: LlmBackend> Agent<B> {
                 }
                 // M3: per-tool quota check
                 if let Some(quota) = self.tool_quotas.get(&call.function.name) {
-                    let usage = quota_usage
-                        .entry(call.function.name.clone())
-                        .or_default();
+                    let usage = quota_usage.entry(call.function.name.clone()).or_default();
                     if let Some(max) = quota.max_calls {
                         if usage.calls >= max {
                             warn!(
@@ -454,16 +455,13 @@ impl<B: LlmBackend> Agent<B> {
                         let (result, dur) = match decision {
                             CallDecision::Refused(msg) => (msg, 0u64),
                             CallDecision::Allow => {
-                                let args: serde_json::Value =
-                                    serde_json::from_str(&args_str)
-                                        .unwrap_or(serde_json::Value::Null);
+                                let args: serde_json::Value = serde_json::from_str(&args_str)
+                                    .unwrap_or(serde_json::Value::Null);
                                 let t0 = std::time::Instant::now();
-                                let result = registry
-                                    .dispatch(&name, args)
-                                    .unwrap_or_else(|e| {
-                                        warn!(tool = %name, error = %e, "tool dispatch failed");
-                                        format!("error: {}", e)
-                                    });
+                                let result = registry.dispatch(&name, args).unwrap_or_else(|e| {
+                                    warn!(tool = %name, error = %e, "tool dispatch failed");
+                                    format!("error: {}", e)
+                                });
                                 let dur = t0.elapsed().as_micros() as u64;
                                 debug!(
                                     tool = %name,
@@ -480,7 +478,13 @@ impl<B: LlmBackend> Agent<B> {
                             duration_us: dur,
                         };
                         observer.on_tool_end(&call_clone, &tool_result);
-                        (id.to_string(), name.to_string(), args_str.to_string(), result, dur)
+                        (
+                            id.to_string(),
+                            name.to_string(),
+                            args_str.to_string(),
+                            result,
+                            dur,
+                        )
                     });
                     (handle, sidecar_id, sidecar_name, sidecar_args)
                 })
@@ -544,11 +548,7 @@ impl<B: LlmBackend> Agent<B> {
             }
             // M3: per-tool `max_result_bytes` is a tighter cap than the
             // global `max_tool_result_bytes`. Apply it first if set.
-            let result = match self
-                .tool_quotas
-                .get(&name)
-                .and_then(|q| q.max_result_bytes)
-            {
+            let result = match self.tool_quotas.get(&name).and_then(|q| q.max_result_bytes) {
                 Some(cap) if result.len() > cap => {
                     let mut end = cap;
                     while end > 0 && !result.is_char_boundary(end) {
@@ -566,6 +566,7 @@ impl<B: LlmBackend> Agent<B> {
                 tool_calls: None,
                 tool_call_id: Some(id),
                 name: Some(name),
+                usage: None,
             };
             self.persist(&msg);
             self.messages.push(msg);
@@ -602,6 +603,7 @@ impl<B: LlmBackend> Agent<B> {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            usage: None,
         };
         self.persist(&user);
         self.messages.push(user);
@@ -611,6 +613,15 @@ impl<B: LlmBackend> Agent<B> {
         // v0.3 M3: per-tool quota state, accumulated across all turns of
         // this step() call. Resets only on return from step().
         let mut quota_usage: HashMap<String, QuotaUsage> = HashMap::new();
+
+        // Token usage accumulated across all inference turns in this step.
+        // Emitted via on_step_usage at every exit point.
+        let mut step_usage = UsageStats::default();
+
+        // Loop detection: tracks (tool_name + args_json) → call count across
+        // all turns. When a (name, args) pair repeats 3+ times the agent injects
+        // a synthetic "loop detected" refusal so the model can change strategy.
+        let mut call_fingerprints: HashMap<String, u32> = HashMap::new();
 
         // v0.3.1: wall-clock deadline for the whole step(). Checked at
         // the top of every turn and again before dispatch. Captured by
@@ -634,6 +645,7 @@ impl<B: LlmBackend> Agent<B> {
         for _ in 0..self.max_steps {
             if let Err(e) = deadline_check("turn_start") {
                 self.observer.on_step_error(&e);
+                self.observer.on_step_usage(step_usage);
                 return Err(e);
             }
 
@@ -662,6 +674,7 @@ impl<B: LlmBackend> Agent<B> {
                         let es = e.to_string();
                         error!(error = %es, "backend chat error");
                         self.observer.on_step_error(&es);
+                        self.observer.on_step_usage(step_usage);
                         es
                     });
                 self.on_token = Some(cb);
@@ -678,6 +691,7 @@ impl<B: LlmBackend> Agent<B> {
                         let es = e.to_string();
                         error!(error = %es, "backend chat error");
                         self.observer.on_step_error(&es);
+                        self.observer.on_step_usage(step_usage);
                         es
                     })?;
                 println!();
@@ -689,10 +703,19 @@ impl<B: LlmBackend> Agent<B> {
                         let es = e.to_string();
                         error!(error = %es, "backend chat error");
                         self.observer.on_step_error(&es);
+                        self.observer.on_step_usage(step_usage);
                         es
                     })?
             };
             drop(_backend_span);
+
+            // Accumulate token usage from this inference turn.
+            if let Some(u) = resp.usage {
+                step_usage.prompt_tokens =
+                    step_usage.prompt_tokens.saturating_add(u.prompt_tokens);
+                step_usage.completion_tokens =
+                    step_usage.completion_tokens.saturating_add(u.completion_tokens);
+            }
 
             let calls = resp.tool_calls.clone();
             let has_calls = calls.as_ref().map(|c| !c.is_empty()).unwrap_or(false);
@@ -701,25 +724,70 @@ impl<B: LlmBackend> Agent<B> {
             self.messages.push(resp);
 
             if !has_calls {
-                let out = self.messages[resp_idx]
-                    .content
-                    .clone()
-                    .unwrap_or_default();
+                let out = self.messages[resp_idx].content.clone().unwrap_or_default();
                 let final_msg = Message {
                     role: "assistant".into(),
                     content: Some(out.clone()),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    usage: None,
                 };
                 self.observer.on_step_end(&final_msg);
+                self.observer.on_step_usage(step_usage);
                 return Ok(out);
             }
 
-            let calls = calls.expect("has_calls checked above");
+            let mut calls = calls.expect("has_calls checked above");
+
+            // Loop detection: replace any call whose (name, args) fingerprint
+            // has been seen 3+ times this step with a synthetic refusal so the
+            // model can recover rather than spinning.
+            for call in &mut calls {
+                let fp = format!("{}:{}", call.function.name, call.function.arguments);
+                let count = call_fingerprints.entry(fp).or_insert(0);
+                *count += 1;
+                if *count >= 3 {
+                    warn!(
+                        tool = %call.function.name,
+                        count = count,
+                        "loop detected — injecting synthetic refusal"
+                    );
+                    // Rewrite the call arguments so dispatch_calls sees a
+                    // Refused decision via an empty arguments poison sentinel.
+                    // We inject the refusal message directly by appending a
+                    // synthetic tool-result message and removing the call from
+                    // the pending set so dispatch_calls never sees it.
+                    let framed = self.frame_tool_output(
+                        &call.function.name,
+                        &call.id,
+                        &format!(
+                            "loop detected: '{}' was called with the same arguments {} times \
+                             this step. Change strategy or stop.",
+                            call.function.name, count
+                        ),
+                    );
+                    let synthetic = Message {
+                        role: "tool".into(),
+                        content: Some(framed),
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                        name: Some(call.function.name.clone()),
+                        usage: None,
+                    };
+                    self.persist(&synthetic);
+                    self.messages.push(synthetic);
+                    // Mark this call as already handled by zeroing its id so
+                    // dispatch_calls can skip it.
+                    call.id = String::new();
+                }
+            }
+            // Remove calls that were replaced by synthetic refusals.
+            calls.retain(|c| !c.id.is_empty());
 
             if let Err(e) = deadline_check("pre_dispatch") {
                 self.observer.on_step_error(&e);
+                self.observer.on_step_usage(step_usage);
                 return Err(e);
             }
 
@@ -730,6 +798,7 @@ impl<B: LlmBackend> Agent<B> {
 
         let err = "max steps exceeded".to_string();
         self.observer.on_step_error(&err);
+        self.observer.on_step_usage(step_usage);
         Err(err)
     }
 }
@@ -751,7 +820,9 @@ fn panic_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
 /// envelope body is left untouched because downstream is a model, not a
 /// browser.
 fn escape_attr(s: &str) -> std::borrow::Cow<'_, str> {
-    if s.bytes().all(|b| b != b'&' && b != b'"' && b != b'<' && b != b'>') {
+    if s.bytes()
+        .all(|b| b != b'&' && b != b'"' && b != b'<' && b != b'>')
+    {
         return std::borrow::Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len());
@@ -792,6 +863,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             })
         }
     }
@@ -803,6 +875,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            usage: None,
         }
     }
 
@@ -849,6 +922,7 @@ mod tests {
             }]),
             tool_call_id: None,
             name: None,
+            usage: None,
         });
         a.messages.push(Message {
             role: "tool".into(),
@@ -856,6 +930,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some("c1".into()),
             name: Some("t".into()),
+            usage: None,
         });
         a.messages.push(msg("assistant", "done"));
         a.messages.push(msg("user", "next"));
@@ -904,7 +979,7 @@ mod tests {
         #[allow(deprecated)]
         let mut a = Agent::new(MockBackend, "sys");
         a.max_tool_result_bytes = 3; // would split a 3-byte char if naive
-        // "é" is 2 bytes, "中" is 3 bytes — "é中" is 5 bytes
+                                     // "é" is 2 bytes, "中" is 3 bytes — "é中" is 5 bytes
         let framed = a.frame_tool_output("t", "id", "é中");
         // truncated, and must not panic mid-char
         assert!(framed.contains("truncated=\"true\""));
@@ -954,24 +1029,34 @@ mod tests {
     }
     impl ScriptedBackend {
         fn new(script: Vec<Message>) -> Self {
-            Self { script: Mutex::new(script.into()) }
+            Self {
+                script: Mutex::new(script.into()),
+            }
         }
     }
     impl LlmBackend for ScriptedBackend {
-        fn model(&self) -> &str { "scripted" }
+        fn model(&self) -> &str {
+            "scripted"
+        }
         fn chat(
             &self,
             _messages: &[Message],
             _tools: &Value,
             _on_token: Option<&mut dyn FnMut(&str)>,
         ) -> Result<Message, BackendError> {
-            let m = self.script.lock().unwrap().pop_front().unwrap_or_else(|| Message {
-                role: "assistant".into(),
-                content: Some("done".into()),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
+            let m = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Message {
+                    role: "assistant".into(),
+                    content: Some("done".into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                    usage: None,
+                });
             Ok(m)
         }
     }
@@ -982,8 +1067,12 @@ mod tests {
         payload: String,
     }
     impl Tool for CountingTool {
-        fn name(&self) -> &str { "counter" }
-        fn description(&self) -> &str { "test counter" }
+        fn name(&self) -> &str {
+            "counter"
+        }
+        fn description(&self) -> &str {
+            "test counter"
+        }
         fn schema(&self) -> Value {
             serde_json::json!({"type":"object","properties":{}})
         }
@@ -1007,6 +1096,7 @@ mod tests {
             }]),
             tool_call_id: None,
             name: None,
+            usage: None,
         }
     }
 
@@ -1014,10 +1104,7 @@ mod tests {
     fn quota_max_calls_refuses_after_limit_within_single_step() {
         // Script: two turns that each call the counter, then a final assistant
         // text. The quota is 1 call — second dispatch should be refused.
-        let script = vec![
-            tool_call("c1", "counter"),
-            tool_call("c2", "counter"),
-        ];
+        let script = vec![tool_call("c1", "counter"), tool_call("c2", "counter")];
         let hits = Arc::new(AtomicUsize::new(0));
         #[allow(deprecated)]
         let mut a = Agent::new(ScriptedBackend::new(script), "sys");
@@ -1027,7 +1114,10 @@ mod tests {
         }));
         a.tool_quotas.insert(
             "counter".into(),
-            ToolQuota { max_calls: Some(1), ..Default::default() },
+            ToolQuota {
+                max_calls: Some(1),
+                ..Default::default()
+            },
         );
         let out = a.step("go").unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 1, "tool must run exactly once");
@@ -1035,9 +1125,15 @@ mod tests {
         // Refusal message should appear in the transcript.
         let refused = a.messages.iter().any(|m| {
             m.role == "tool"
-                && m.content.as_deref().map(|c| c.contains("quota exceeded")).unwrap_or(false)
+                && m.content
+                    .as_deref()
+                    .map(|c| c.contains("quota exceeded"))
+                    .unwrap_or(false)
         });
-        assert!(refused, "second call must produce a quota-refused tool message");
+        assert!(
+            refused,
+            "second call must produce a quota-refused tool message"
+        );
     }
 
     #[test]
@@ -1052,7 +1148,10 @@ mod tests {
         }));
         a.tool_quotas.insert(
             "counter".into(),
-            ToolQuota { max_result_bytes: Some(4), ..Default::default() },
+            ToolQuota {
+                max_result_bytes: Some(4),
+                ..Default::default()
+            },
         );
         a.step("go").unwrap();
         let tool_msg = a
@@ -1084,10 +1183,17 @@ mod tests {
             payload: "should not run".into(),
         }));
         a.step("go").unwrap();
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "observer must block dispatch");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "observer must block dispatch"
+        );
         let refused = a.messages.iter().any(|m| {
             m.role == "tool"
-                && m.content.as_deref().map(|c| c.contains("refused by observer")).unwrap_or(false)
+                && m.content
+                    .as_deref()
+                    .map(|c| c.contains("refused by observer"))
+                    .unwrap_or(false)
         });
         assert!(refused);
     }
@@ -1099,8 +1205,12 @@ mod tests {
         dur: std::time::Duration,
     }
     impl Tool for SleepyTool {
-        fn name(&self) -> &str { "sleepy" }
-        fn description(&self) -> &str { "sleeps" }
+        fn name(&self) -> &str {
+            "sleepy"
+        }
+        fn description(&self) -> &str {
+            "sleeps"
+        }
         fn schema(&self) -> Value {
             serde_json::json!({"type":"object","properties":{}})
         }
@@ -1115,10 +1225,7 @@ mod tests {
         // Script: two tool-call turns. Each tool call sleeps 80ms. The
         // deadline is 100ms so the *second* turn's pre_dispatch check
         // must fail before the second tool runs.
-        let script = vec![
-            tool_call("c1", "sleepy"),
-            tool_call("c2", "sleepy"),
-        ];
+        let script = vec![tool_call("c1", "sleepy"), tool_call("c2", "sleepy")];
         #[allow(deprecated)]
         let mut a = Agent::new(ScriptedBackend::new(script), "sys");
         a.tools.register(Box::new(SleepyTool {
@@ -1148,8 +1255,12 @@ mod tests {
 
     struct PanickingTool;
     impl Tool for PanickingTool {
-        fn name(&self) -> &str { "panicker" }
-        fn description(&self) -> &str { "always panics" }
+        fn name(&self) -> &str {
+            "panicker"
+        }
+        fn description(&self) -> &str {
+            "always panics"
+        }
         fn schema(&self) -> Value {
             serde_json::json!({"type":"object","properties":{}})
         }

@@ -195,6 +195,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             })
         }
     }
@@ -205,7 +206,7 @@ mod tests {
             .system("sys")
             .build()
             .unwrap();
-        assert_eq!(agent.max_steps, 10);
+        assert_eq!(agent.max_steps, 25);
         assert_eq!(agent.max_window, 40);
         assert_eq!(agent.messages[0].role, "system");
         assert_eq!(agent.messages[0].content.as_deref(), Some("sys"));

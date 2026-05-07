@@ -2,6 +2,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Token usage reported by the backend for a single inference call.
+///
+/// Fields are zero when the backend didn't surface usage data (e.g. when
+/// streaming is enabled and the provider omits the final usage event).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageStats {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
+impl UsageStats {
+    pub fn total(&self) -> u32 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
 /// A conversation message in the OpenAI-flavored internal format.
 ///
 /// Backends that use a different wire format (e.g. Anthropic's content blocks)
@@ -17,6 +33,10 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Token usage for this inference call. Not serialized into chat history —
+    /// only present on assistant messages returned directly from the backend.
+    #[serde(skip)]
+    pub usage: Option<UsageStats>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
