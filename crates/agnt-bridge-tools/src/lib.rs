@@ -35,6 +35,7 @@ pub mod computer;
 pub mod desktop;
 pub mod dispatch;
 pub mod memory;
+pub mod retrieval;
 pub mod search;
 pub mod shell;
 pub mod vision;
@@ -47,6 +48,7 @@ pub use computer::{
 pub use desktop::{ClipboardGet, CurrentWindow, Notification, OpenApp, OpenUrl, Screenshot};
 pub use dispatch::DispatchAgent;
 pub use memory::{MemctlIngest, MemctlRecall};
+pub use retrieval::{Rerank, RetrievalConfig, SemanticSearch};
 pub use search::{SearchConfig, WebSearch};
 pub use vision::{LookAtScreen, VisionConfig};
 
@@ -69,6 +71,8 @@ pub const ALL_TOOLS: &[&str] = &[
     "focus_window",
     "get_mouse",
     "look_at_screen",
+    "semantic_search",
+    "rerank",
 ];
 
 /// Configuration for the system-tool surface.
@@ -90,6 +94,14 @@ pub struct SystemToolsConfig {
     /// `SafetyMode::Confirm` — every destructive call publishes a
     /// confirmation request and waits for explicit approval.
     pub computer_use_safety: SafetyPolicy,
+    /// Model override for enhanced pass-1 bbox localisation. `None` = vznd default.
+    pub vision_localize_model: Option<String>,
+    /// Model override for standard single-pass and enhanced pass-2 analysis.
+    /// `None` = vznd default.
+    pub vision_analyze_model: Option<String>,
+    /// Config for semantic_search and rerank. Uses sensible defaults pointing
+    /// at the LiteLLM proxy on lnx-rig.
+    pub retrieval: RetrievalConfig,
 }
 
 impl Default for SystemToolsConfig {
@@ -100,6 +112,9 @@ impl Default for SystemToolsConfig {
             memctl_bin: home.join(".local/bin/memctl"),
             cache_dir: home.join(".cache/voicectl"),
             computer_use_safety: SafetyPolicy::default(),
+            vision_localize_model: None,
+            vision_analyze_model: None,
+            retrieval: RetrievalConfig::default(),
         }
     }
 }
@@ -155,10 +170,15 @@ pub fn build_tool(
                 Box::new(LookAtScreen::new(
                     VisionConfig {
                         cache_dir: cfg.cache_dir.clone(),
+                        localize_model: cfg.vision_localize_model.clone(),
+                        analyze_model: cfg.vision_analyze_model.clone(),
                     },
                     bus,
                 )) as Box<dyn agnt::Tool>
             }),
+        // Retrieval tools — no bus required, just LiteLLM reachability.
+        "semantic_search" => Some(Box::new(SemanticSearch::new(cfg.retrieval.clone()))),
+        "rerank" => Some(Box::new(Rerank::new(cfg.retrieval.clone()))),
         _ => None,
     }
 }
