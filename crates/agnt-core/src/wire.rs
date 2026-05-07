@@ -9,6 +9,16 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// ── WireError ─────────────────────────────────────────────────────────────────
+
+/// Errors returned by wire-layer helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireError {
+    /// The agent name contains a character illegal in a NATS subject token
+    /// (`.`, `>`, `*`, or any whitespace).
+    InvalidAgentName(String),
+}
+
 // ── RequestId ────────────────────────────────────────────────────────────────
 
 /// Stable identifier for a single agent dispatch request.
@@ -163,12 +173,12 @@ pub struct ConfirmRequest {
 ///
 /// Published on [`subjects::CONFIRM_REPLY`] (`agnt.confirm.reply`).
 ///
-/// `request_id` empty or `"*"` matches the most recent pending request — the
-/// path used by voice approval and `voicectl confirm` shortcut.
+/// `request_id` `"*"` matches the most recent pending request — the path used
+/// by voice approval and `voicectl confirm` shortcut.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfirmReply {
-    /// UUID from [`ConfirmRequest::request_id`], or empty / `"*"` to match
-    /// the latest request.
+    /// UUID from [`ConfirmRequest::request_id`], or `"*"` to match the latest
+    /// request.
     pub request_id: String,
     pub approved: bool,
     /// Optional caller identity for debug logging (`"cli"`, `"tray"`,
@@ -180,7 +190,7 @@ pub struct ConfirmReply {
 // ── Subject constants and builders ────────────────────────────────────────────
 
 pub mod subjects {
-    use super::RequestId;
+    use super::{RequestId, WireError};
 
     // Agent dispatch
 
@@ -203,24 +213,41 @@ pub mod subjects {
     /// Payload: [`super::ConfirmReply`]
     pub const CONFIRM_REPLY: &str = "agnt.confirm.reply";
 
+    /// Validate that `name` is a legal NATS subject token for an agent name.
+    ///
+    /// Rejects any string containing `.`, `>`, `*`, or ASCII/Unicode whitespace,
+    /// all of which are reserved or ambiguous in NATS subject hierarchies.
+    pub fn validate_nats_token(name: &str) -> Result<(), WireError> {
+        let illegal = |c: char| matches!(c, '.' | '>' | '*') || c.is_whitespace();
+        if name.chars().any(illegal) {
+            Err(WireError::InvalidAgentName(name.to_owned()))
+        } else {
+            Ok(())
+        }
+    }
+
     /// `agent.dispatch.<name>`
-    pub fn dispatch_for(name: &str) -> String {
-        format!("{AGENT_DISPATCH_PREFIX}.{name}")
+    pub fn dispatch_for(name: &str) -> Result<String, WireError> {
+        validate_nats_token(name)?;
+        Ok(format!("{AGENT_DISPATCH_PREFIX}.{name}"))
     }
 
     /// `agent.token.<name>.<request_id>`
-    pub fn token_for(name: &str, request_id: &RequestId) -> String {
-        format!("{AGENT_TOKEN_PREFIX}.{name}.{request_id}")
+    pub fn token_for(name: &str, request_id: &RequestId) -> Result<String, WireError> {
+        validate_nats_token(name)?;
+        Ok(format!("{AGENT_TOKEN_PREFIX}.{name}.{request_id}"))
     }
 
     /// `agent.cancel.<name>`
-    pub fn cancel_for(name: &str) -> String {
-        format!("{AGENT_CANCEL_PREFIX}.{name}")
+    pub fn cancel_for(name: &str) -> Result<String, WireError> {
+        validate_nats_token(name)?;
+        Ok(format!("{AGENT_CANCEL_PREFIX}.{name}"))
     }
 
     /// `agent.response.<name>.<request_id>`
-    pub fn response_for(name: &str, request_id: &RequestId) -> String {
-        format!("{AGENT_RESPONSE_PREFIX}.{name}.{request_id}")
+    pub fn response_for(name: &str, request_id: &RequestId) -> Result<String, WireError> {
+        validate_nats_token(name)?;
+        Ok(format!("{AGENT_RESPONSE_PREFIX}.{name}.{request_id}"))
     }
 }
 
@@ -403,27 +430,69 @@ mod tests {
 
     #[test]
     fn subjects_dispatch_for() {
-        assert_eq!(subjects::dispatch_for("sage"), "agent.dispatch.sage");
+        assert_eq!(
+            subjects::dispatch_for("sage").unwrap(),
+            "agent.dispatch.sage"
+        );
     }
 
     #[test]
     fn subjects_token_for() {
         let id = RequestId::new();
-        let subj = subjects::token_for("sage", &id);
+        let subj = subjects::token_for("sage", &id).unwrap();
         assert!(subj.starts_with("agent.token.sage."));
         assert!(subj.ends_with(&id.to_string()));
     }
 
     #[test]
     fn subjects_cancel_for() {
-        assert_eq!(subjects::cancel_for("nexus"), "agent.cancel.nexus");
+        assert_eq!(
+            subjects::cancel_for("nexus").unwrap(),
+            "agent.cancel.nexus"
+        );
     }
 
     #[test]
     fn subjects_response_for() {
         let id = RequestId::new();
-        let subj = subjects::response_for("sage", &id);
+        let subj = subjects::response_for("sage", &id).unwrap();
         assert!(subj.starts_with("agent.response.sage."));
+    }
+
+    #[test]
+    fn validate_nats_token_rejects_dot() {
+        assert_eq!(
+            subjects::validate_nats_token("bad.name"),
+            Err(WireError::InvalidAgentName("bad.name".into()))
+        );
+    }
+
+    #[test]
+    fn validate_nats_token_rejects_gt() {
+        assert!(subjects::validate_nats_token("bad>name").is_err());
+    }
+
+    #[test]
+    fn validate_nats_token_rejects_star() {
+        assert!(subjects::validate_nats_token("bad*name").is_err());
+    }
+
+    #[test]
+    fn validate_nats_token_rejects_whitespace() {
+        assert!(subjects::validate_nats_token("bad name").is_err());
+        assert!(subjects::validate_nats_token("bad\tname").is_err());
+    }
+
+    #[test]
+    fn validate_nats_token_accepts_valid_name() {
+        assert!(subjects::validate_nats_token("sage").is_ok());
+        assert!(subjects::validate_nats_token("NEXUS-2").is_ok());
+        assert!(subjects::validate_nats_token("agent_42").is_ok());
+    }
+
+    #[test]
+    fn dispatch_for_rejects_invalid_name() {
+        assert!(subjects::dispatch_for("bad.name").is_err());
     }
 
     #[test]

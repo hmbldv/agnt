@@ -41,4 +41,5 @@ pub use store_trait::{MessageStore, StoreError, ToolLog};
 pub use tool::{ErasedAdapter, Registry, Tool, TypedTool};
 pub use wire::{
     AgentCancel, AgentDispatch, AgentReply, AgentToken, ConfirmReply, ConfirmRequest, RequestId,
+    WireError,
 };
