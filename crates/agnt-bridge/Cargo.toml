@@ -1,0 +1,44 @@
+[package]
+name = "agnt-bridge"
+description = "NATS↔agnt-rs bridge daemon. One process per agent; voicectld + other clients dispatch via `agent.dispatch.<name>`."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+authors = ["doop <johnnyendrihs@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hmbldv/voicectl"
+
+[[bin]]
+name = "agnt-bridge"
+path = "src/main.rs"
+
+[lib]
+# Library surface exists purely to make the dispatch logic unit-testable.
+# The binary just calls into it.
+name = "agnt_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+voicectl-core = { path = "../../../../voicectl/main/crates/voicectl-core" }
+voicectl-net = { path = "../../../../voicectl/main/crates/voicectl-net" }
+agnt-bridge-tools = { path = "../agnt-bridge-tools" }
+agnt = { path = "../agnt", default-features = false, features = ["net", "store", "tools"] }
+agnt-core = { path = "../agnt-core" }
+async-nats = "0.38"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
