@@ -124,11 +124,28 @@ pub struct ToolsSection {
     pub computer_use_safe_focus_apps: Option<Vec<String>>,
     /// Vision-LLM endpoint for `look_at_screen` (OpenAI-compatible
     /// chat-completions URL). Default: `http://lnx-rig:8002/v1/chat/completions`.
+    /// Retained for backward-compat but silently ignored — look_at_screen now
+    /// dispatches over NATS to vznd, not directly to a model.
     #[serde(default)]
     pub vision_url: Option<String>,
-    /// Vision-LLM model name advertised by the endpoint. Default: `qwen2-vl-2b`.
+    /// Vision-LLM model name advertised by the endpoint. Retained for
+    /// backward-compat but silently ignored — use `vision_analyze_model` instead.
     #[serde(default)]
     pub vision_model: Option<String>,
+    /// Model override for vznd enhanced pass-1 bbox localisation.
+    /// When set, vznd uses this model for the thumbnail → bbox step.
+    /// Good choice: `"qwen2-vl-2b"` (fast, local). Default: vznd's configured default.
+    #[serde(default)]
+    pub vision_localize_model: Option<String>,
+    /// Model override for vznd standard single-pass and enhanced pass-2 analysis.
+    /// When set, vznd uses this model when analysing the (cropped) screenshot.
+    /// Default: `"gemma4-quality"`. Set to `None` in config to let vznd decide.
+    #[serde(default = "default_vision_analyze_model")]
+    pub vision_analyze_model: Option<String>,
+}
+
+fn default_vision_analyze_model() -> Option<String> {
+    Some("gemma4-quality".to_string())
 }
 
 /// NATS connection + subject naming.
