@@ -30,6 +30,7 @@ pub mod message;
 pub mod observer;
 pub mod store_trait;
 pub mod tool;
+pub mod wire;
 
 pub use agent::Agent;
 pub use backend_trait::{BackendError, LlmBackend};
@@ -38,3 +39,6 @@ pub use message::{FunctionCall, Message, ToolCall};
 pub use observer::{Disposition, Observer, StepContext, ToolResult};
 pub use store_trait::{MessageStore, StoreError, ToolLog};
 pub use tool::{ErasedAdapter, Registry, Tool, TypedTool};
+pub use wire::{
+    AgentCancel, AgentDispatch, AgentReply, AgentToken, ConfirmReply, ConfirmRequest, RequestId,
+};
