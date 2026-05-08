@@ -468,7 +468,7 @@ impl agnt::Tool for Screenshot {
         }
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let path = dir.join(format!("{ts}.png"));
-        // gnome-screenshot is the GNOME default; on stock ubu it may be
+        // gnome-screenshot is the GNOME default; on some systems it may be
         // missing — fall back to ImageMagick `import`.
         if try_screenshot("gnome-screenshot", &["-f", path_str(&path)?]).is_ok() && path.exists() {
             return Ok(format!("{{\"path\":\"{}\"}}", path.display()));

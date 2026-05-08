@@ -1,6 +1,6 @@
 //! Live multi-turn session test (`#[ignore]`d).
 //!
-//! Spawns an `agnt-bridge` child against ubu's local vLLM and exercises:
+//! Spawns an `agnt-bridge` child against the local vLLM and exercises:
 //!   1. Turn 1: "My name is Johnny." (within session)
 //!   2. Turn 2: "What is my name?" — reply must mention "Johnny" because the
 //!      bridge persists history into agnt's `Store::sqlite` and replays it on
@@ -30,7 +30,7 @@ use tokio::process::{Child, Command};
 
 use voicectl_core::events::{AgentDispatch, AgentReply, RequestId};
 
-const NATS_URL: &str = "nats://lnx-rig:4222";
+const NATS_URL: &str = "nats://localhost:4222";
 
 fn workspace_root() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
@@ -144,7 +144,7 @@ async fn one_turn(nats: &async_nats::Client, agent_name: &str, user_input: &str)
 }
 
 #[tokio::test]
-#[ignore = "spawns agnt-bridge against ubu vLLM + lnx-rig NATS; \
+#[ignore = "spawns agnt-bridge against local vLLM + localhost NATS; \
             run with --ignored, NATS_USER + NATS_PASSWORD + LITELLM_API_KEY"]
 async fn multi_turn_remembers_then_forgets_after_timeout() {
     assert!(std::env::var("NATS_USER").is_ok(), "NATS_USER required");

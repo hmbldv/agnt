@@ -1,12 +1,12 @@
 //! Live bridge cycle test (`#[ignore]`d).
 //!
 //! Spawns a fresh `agnt-bridge` child process pointing at a temp config that
-//! talks to ubu's local vLLM. Publishes one `AgentDispatch` on
+//! talks to the local vLLM. Publishes one `AgentDispatch` on
 //! `agent.dispatch.<name>` and asserts the corresponding `AgentReply`
 //! arrives on the inbox subject within the timeout.
 //!
 //! Why ignored:
-//! - Requires NATS reachable at `nats://lnx-rig:4222` with `NATS_USER` /
+//! - Requires NATS reachable at `nats://localhost:4222` with `NATS_USER` /
 //!   `NATS_PASSWORD` set.
 //! - Requires a working vLLM at `http://localhost:8001/v1` serving
 //!   `gemma4-26b` (or whatever model the test config picks).
@@ -26,7 +26,7 @@ use tokio::process::{Child, Command};
 
 use voicectl_core::events::{AgentDispatch, AgentReply, RequestId};
 
-const NATS_URL: &str = "nats://lnx-rig:4222";
+const NATS_URL: &str = "nats://localhost:4222";
 const TEST_AGENT: &str = "agnt-bridge-livetest";
 
 fn workspace_root() -> PathBuf {
@@ -116,7 +116,7 @@ impl Drop for ChildGuard {
 }
 
 #[tokio::test]
-#[ignore = "spawns agnt-bridge against ubu vLLM + lnx-rig NATS; \
+#[ignore = "spawns agnt-bridge against local vLLM + localhost NATS; \
             run with --ignored, NATS_USER + NATS_PASSWORD + LITELLM_API_KEY"]
 async fn live_bridge_round_trip() {
     // Pre-flight: test creds.

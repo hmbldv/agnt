@@ -1,12 +1,12 @@
 //! Live cc-bridge cycle test (`#[ignore]`d).
 //!
 //! Spawns a fresh `cc-bridge` child process pointing at a temp config that
-//! invokes `claude --print` locally on ubu (the test runner host). Publishes
+//! invokes `claude --print` locally on the test runner host. Publishes
 //! one `AgentDispatch` on `cc.dispatch.<persona>` and asserts the
 //! corresponding `AgentReply` arrives on the inbox subject within 60s.
 //!
 //! Why ignored:
-//! - Requires NATS reachable at `nats://lnx-rig:4222` with `NATS_USER` /
+//! - Requires NATS reachable at `nats://localhost:4222` with `NATS_USER` /
 //!   `NATS_PASSWORD` set.
 //! - Requires a working `claude` binary on the local machine and a valid
 //!   Anthropic credential cached for it.
@@ -27,7 +27,7 @@ use tokio::process::{Child, Command};
 
 use voicectl_core::events::{AgentDispatch, AgentReply, RequestId};
 
-const NATS_URL: &str = "nats://lnx-rig:4222";
+const NATS_URL: &str = "nats://localhost:4222";
 const TEST_PERSONA: &str = "cclivetest";
 const TEST_BRIDGE: &str = "cc-bridge-livetest";
 
@@ -104,7 +104,7 @@ impl Drop for ChildGuard {
 }
 
 #[tokio::test]
-#[ignore = "spawns cc-bridge against a local claude + lnx-rig NATS; \
+#[ignore = "spawns cc-bridge against a local claude + localhost NATS; \
             run with --ignored, NATS_USER + NATS_PASSWORD + a logged-in \
             claude install"]
 async fn live_cc_bridge_round_trip() {

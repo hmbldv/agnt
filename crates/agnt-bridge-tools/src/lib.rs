@@ -38,6 +38,7 @@ pub mod memory;
 pub mod retrieval;
 pub mod search;
 pub mod shell;
+pub mod vault;
 pub mod vision;
 
 use std::sync::Arc;
@@ -50,6 +51,7 @@ pub use dispatch::DispatchAgent;
 pub use memory::{MemctlIngest, MemctlRecall};
 pub use retrieval::{Rerank, RetrievalConfig, SemanticSearch};
 pub use search::{SearchConfig, WebSearch};
+pub use vault::{VaultFind, VaultRecent};
 pub use vision::{LookAtScreen, VisionConfig};
 
 /// Names of every tool exposed by this crate. Useful for config validation.
@@ -77,11 +79,11 @@ pub const ALL_TOOLS: &[&str] = &[
 
 /// Configuration for the system-tool surface.
 ///
-/// Defaults work on a stock ubu desktop. `searxng_url` and the dispatch
+/// Defaults work on a stock Linux desktop. `searxng_url` and the dispatch
 /// bus only matter if you enable the relevant tools.
 #[derive(Clone, Debug)]
 pub struct SystemToolsConfig {
-    /// Where SearXNG lives. Used by `web_search`. Default: `http://lnx-rig:8888`.
+    /// Where SearXNG lives. Used by `web_search`. Default: `http://your-litellm-proxy:8888`.
     pub searxng_url: String,
     /// Path to memctl. Default: `~/.local/bin/memctl`.
     pub memctl_bin: std::path::PathBuf,
@@ -100,7 +102,7 @@ pub struct SystemToolsConfig {
     /// `None` = vznd default.
     pub vision_analyze_model: Option<String>,
     /// Config for semantic_search and rerank. Uses sensible defaults pointing
-    /// at the LiteLLM proxy on lnx-rig.
+    /// at the LiteLLM proxy on your-litellm-proxy.
     pub retrieval: RetrievalConfig,
 }
 
@@ -108,7 +110,7 @@ impl Default for SystemToolsConfig {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         Self {
-            searxng_url: "http://lnx-rig:8888".into(),
+            searxng_url: "http://localhost:8888".into(),
             memctl_bin: home.join(".local/bin/memctl"),
             cache_dir: home.join(".cache/voicectl"),
             computer_use_safety: SafetyPolicy::default(),
