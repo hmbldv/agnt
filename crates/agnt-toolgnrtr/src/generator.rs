@@ -109,6 +109,7 @@ impl<'a> Generator<'a> {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             },
             Message {
                 role: "user".into(),
@@ -116,6 +117,7 @@ impl<'a> Generator<'a> {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             },
         ];
         let reply = self
@@ -152,6 +154,7 @@ impl<'a> Generator<'a> {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             },
             Message {
                 role: "user".into(),
@@ -159,6 +162,7 @@ impl<'a> Generator<'a> {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                usage: None,
             },
         ];
         let reply = self
