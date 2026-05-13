@@ -89,7 +89,11 @@ fn build_backend(kind: BackendKind, model: &str, api_key: Option<String>) -> Res
             let key = api_key
                 .or_else(|| std::env::var("OPENAI_API_KEY").ok())
                 .ok_or_else(|| "missing API key for openai".to_string())?;
-            Ok(Backend::openai(model, &key))
+            let mut b = Backend::openai(model, &key);
+            if let Ok(base) = std::env::var("OPENAI_API_BASE") {
+                b = b.with_base_url(&base);
+            }
+            Ok(b)
         }
         BackendKind::Anthropic => {
             let key = api_key
