@@ -298,21 +298,18 @@ impl McpClient {
                         let _ = tx.send(ReaderMsg::Eof);
                         return;
                     }
-                    Ok(BoundedRead::Line) => {
-                        match std::str::from_utf8(&buf) {
-                            Ok(s) => {
-                                if tx.send(ReaderMsg::Line(s.to_string())).is_err() {
-                                    return;
-                                }
-                            }
-                            Err(_) => {
-                                let _ = tx.send(ReaderMsg::Error(
-                                    "non-utf8 bytes on mcp stdout".into(),
-                                ));
+                    Ok(BoundedRead::Line) => match std::str::from_utf8(&buf) {
+                        Ok(s) => {
+                            if tx.send(ReaderMsg::Line(s.to_string())).is_err() {
                                 return;
                             }
                         }
-                    }
+                        Err(_) => {
+                            let _ =
+                                tx.send(ReaderMsg::Error("non-utf8 bytes on mcp stdout".into()));
+                            return;
+                        }
+                    },
                     Err(BoundedReadError::Overflow) => {
                         let _ = tx.send(ReaderMsg::Error(format!(
                             "mcp line exceeded {} bytes",
@@ -457,14 +454,13 @@ impl McpClient {
         line.push('\n');
 
         {
-            let stdin = self
-                .stdin
-                .as_mut()
-                .ok_or(McpError::Closed)?;
+            let stdin = self.stdin.as_mut().ok_or(McpError::Closed)?;
             stdin
                 .write_all(line.as_bytes())
                 .map_err(|e| McpError::Io(format!("write: {}", e)))?;
-            stdin.flush().map_err(|e| McpError::Io(format!("flush: {}", e)))?;
+            stdin
+                .flush()
+                .map_err(|e| McpError::Io(format!("flush: {}", e)))?;
         }
 
         self.await_response(id)
@@ -702,7 +698,10 @@ mod tests {
         // the initialize reply can arrive.
         let err = McpClient::start("/bin/sh", &["-c", "exit 0"]).expect_err("should fail");
         assert!(
-            matches!(err, McpError::Closed | McpError::Io(_) | McpError::Protocol(_)),
+            matches!(
+                err,
+                McpError::Closed | McpError::Io(_) | McpError::Protocol(_)
+            ),
             "got {:?}",
             err
         );
@@ -710,8 +709,8 @@ mod tests {
 
     #[test]
     fn spawn_nonexistent_binary_is_io_error() {
-        let err = McpClient::start("/definitely/not/a/real/binary-xyz", &[])
-            .expect_err("should fail");
+        let err =
+            McpClient::start("/definitely/not/a/real/binary-xyz", &[]).expect_err("should fail");
         assert!(matches!(err, McpError::Io(_)), "got {:?}", err);
     }
 
@@ -719,7 +718,8 @@ mod tests {
     fn mcp_tool_bridges_to_agnt_core_tool_trait() {
         use agnt_core::tool::Tool;
         let init = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#;
-        let call = r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"routed"}]}}"#;
+        let call =
+            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"routed"}]}}"#;
         let client = start_mock(&[init, call]);
         let shared = Arc::new(Mutex::new(client));
         let info = McpToolInfo {
@@ -760,7 +760,9 @@ mod tests {
         assert_eq!(McpError::Timeout.to_string(), "mcp timeout");
         assert_eq!(McpError::Closed.to_string(), "mcp channel closed");
         assert!(McpError::Io("x".into()).to_string().contains("io"));
-        assert!(McpError::Protocol("x".into()).to_string().contains("protocol"));
+        assert!(McpError::Protocol("x".into())
+            .to_string()
+            .contains("protocol"));
     }
 
     // ---- v0.3.1 bounded reader DoS fix -----------------------------------
@@ -770,9 +772,8 @@ mod tests {
         let input: &[u8] = b"hello\n";
         let mut r = std::io::BufReader::new(input);
         let mut buf = Vec::new();
-        let outcome = read_bounded_line(&mut r, &mut buf, 1024).unwrap_or_else(|_| {
-            panic!("should accept short line")
-        });
+        let outcome = read_bounded_line(&mut r, &mut buf, 1024)
+            .unwrap_or_else(|_| panic!("should accept short line"));
         assert!(matches!(outcome, BoundedRead::Line));
         assert_eq!(buf, b"hello");
     }

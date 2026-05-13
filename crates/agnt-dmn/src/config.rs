@@ -31,10 +31,18 @@ pub struct Config {
     pub tool_result_as_user: bool,
 }
 
-fn default_host() -> String { "127.0.0.1".into() }
-fn default_port() -> u16 { 7770 }
-fn default_model() -> String { "gemma3:4b".into() }
-fn default_provider() -> String { "ollama".into() }
+fn default_host() -> String {
+    "127.0.0.1".into()
+}
+fn default_port() -> u16 {
+    7770
+}
+fn default_model() -> String {
+    "gemma3:4b".into()
+}
+fn default_provider() -> String {
+    "ollama".into()
+}
 impl Default for Config {
     fn default() -> Self {
         Self {

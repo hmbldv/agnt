@@ -52,10 +52,7 @@ impl Observer for EngineObserver {
 
         // Deny list takes precedence.
         if self.denied_tools.contains(tool_name) {
-            return Disposition::Refused(format!(
-                "tool '{}' is denied by policy",
-                tool_name
-            ));
+            return Disposition::Refused(format!("tool '{}' is denied by policy", tool_name));
         }
 
         // If permit list is non-empty, tool must be in it.
@@ -87,11 +84,7 @@ mod tests {
     #[test]
     fn permits_allowed_tool() {
         let credits = EngineObserver::credits_counter();
-        let obs = EngineObserver::new(
-            credits,
-            vec!["read_file".into()],
-            vec![],
-        );
+        let obs = EngineObserver::new(credits, vec!["read_file".into()], vec![]);
         let call = ToolCall {
             id: "1".into(),
             call_type: "function".into(),
@@ -106,11 +99,7 @@ mod tests {
     #[test]
     fn refuses_unlisted_tool() {
         let credits = EngineObserver::credits_counter();
-        let obs = EngineObserver::new(
-            credits,
-            vec!["read_file".into()],
-            vec![],
-        );
+        let obs = EngineObserver::new(credits, vec!["read_file".into()], vec![]);
         let call = ToolCall {
             id: "1".into(),
             call_type: "function".into(),
@@ -119,17 +108,16 @@ mod tests {
                 arguments: "{}".into(),
             },
         };
-        assert!(matches!(obs.should_dispatch(&call), Disposition::Refused(_)));
+        assert!(matches!(
+            obs.should_dispatch(&call),
+            Disposition::Refused(_)
+        ));
     }
 
     #[test]
     fn deny_overrides_permit() {
         let credits = EngineObserver::credits_counter();
-        let obs = EngineObserver::new(
-            credits,
-            vec!["shell".into()],
-            vec!["shell".into()],
-        );
+        let obs = EngineObserver::new(credits, vec!["shell".into()], vec!["shell".into()]);
         let call = ToolCall {
             id: "1".into(),
             call_type: "function".into(),
@@ -138,7 +126,10 @@ mod tests {
                 arguments: "{}".into(),
             },
         };
-        assert!(matches!(obs.should_dispatch(&call), Disposition::Refused(_)));
+        assert!(matches!(
+            obs.should_dispatch(&call),
+            Disposition::Refused(_)
+        ));
     }
 
     #[test]

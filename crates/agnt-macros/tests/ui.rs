@@ -24,7 +24,9 @@ struct AddOut {
 /// Add two integers and return their sum.
 #[tool]
 fn add(args: AddArgs) -> Result<AddOut, String> {
-    Ok(AddOut { sum: args.a + args.b })
+    Ok(AddOut {
+        sum: args.a + args.b,
+    })
 }
 
 #[test]

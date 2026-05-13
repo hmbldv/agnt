@@ -320,11 +320,11 @@ mod tests {
 name = "codex"
 
 [bus]
-nats_url = "nats://lnx-rig:4222"
+nats_url = "nats://localhost:4222"
 
 [[personas]]
 name = "archon"
-host = "lnx-rig"
+host = "build-server"
 cwd = "/tmp"
 permission_mode = "bypassPermissions"
 "#,

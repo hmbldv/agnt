@@ -8,7 +8,7 @@
 //! ### Verified protocol (from earlier session)
 //!
 //! ```bash
-//! ssh lnx-rig "claude --print --permission-mode bypassPermissions \
+//! ssh build-server "claude --print --permission-mode bypassPermissions \
 //!     --output-format json '<task>'"
 //! ```
 //!
@@ -339,8 +339,8 @@ mod tests {
     fn fixture_persona() -> Persona {
         Persona {
             name: "archon".into(),
-            host: "lnx-rig".into(),
-            cwd: "/home/squinks/projects".into(),
+            host: "build-server".into(),
+            cwd: "/home/user/projects".into(),
             permission_mode: "bypassPermissions".into(),
             system_prompt_file: None,
             daily_cost_limit_usd: Some(5.0),
@@ -368,9 +368,9 @@ mod tests {
         assert_eq!(args[0], "-o");
         assert_eq!(args[1], "BatchMode=yes");
         // Host is the 5th arg (after the two -o pairs).
-        assert_eq!(args[4], "lnx-rig");
+        assert_eq!(args[4], "build-server");
         let remote_cmd = &args[5];
-        assert!(remote_cmd.contains("cd '/home/squinks/projects' &&"));
+        assert!(remote_cmd.contains("cd '/home/user/projects' &&"));
         assert!(remote_cmd.contains(" claude --print"));
         assert!(remote_cmd.contains("--permission-mode bypassPermissions"));
         assert!(remote_cmd.contains("--output-format json"));
@@ -384,7 +384,7 @@ mod tests {
         let (prog, args) = build_command(&p, "say hi");
         assert_eq!(prog, "sh");
         assert_eq!(args[0], "-c");
-        assert!(args[1].starts_with("cd '/home/squinks/projects' && claude"));
+        assert!(args[1].starts_with("cd '/home/user/projects' && claude"));
     }
 
     #[test]

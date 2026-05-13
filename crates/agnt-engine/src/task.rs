@@ -58,7 +58,9 @@ pub struct RetryPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Backoff {
-    Fixed { delay_ms: u64 },
+    Fixed {
+        delay_ms: u64,
+    },
     Exponential {
         base_ms: u64,
         cap_ms: u64,

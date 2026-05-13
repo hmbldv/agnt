@@ -29,13 +29,11 @@ static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     note = "use agnt_tools::Fetch directly; this shim has no SSRF guard and will be removed in v0.4"
 )]
 pub fn agent() -> &'static ureq::Agent {
-    AGENT.get_or_init(|| {
-        match native_tls::TlsConnector::new() {
-            Ok(connector) => ureq::AgentBuilder::new()
-                .tls_connector(Arc::new(connector))
-                .redirects(0)
-                .build(),
-            Err(_) => ureq::AgentBuilder::new().redirects(0).build(),
-        }
+    AGENT.get_or_init(|| match native_tls::TlsConnector::new() {
+        Ok(connector) => ureq::AgentBuilder::new()
+            .tls_connector(Arc::new(connector))
+            .redirects(0)
+            .build(),
+        Err(_) => ureq::AgentBuilder::new().redirects(0).build(),
     })
 }

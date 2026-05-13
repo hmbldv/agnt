@@ -12,7 +12,10 @@ static AGENT: OnceLock<Result<ureq::Agent, String>> = OnceLock::new();
 
 /// Build a ureq Agent with a native-tls connector so HTTPS verifies against
 /// the system CA store. Returns an error if TLS initialization fails.
-pub fn build_agent(connect_timeout: Duration, read_timeout: Duration) -> Result<ureq::Agent, String> {
+pub fn build_agent(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<ureq::Agent, String> {
     let connector = native_tls::TlsConnector::new()
         .map_err(|e| format!("native-tls connector init failed: {}", e))?;
     Ok(ureq::AgentBuilder::new()

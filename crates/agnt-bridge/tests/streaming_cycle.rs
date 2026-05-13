@@ -22,7 +22,7 @@ use tokio::process::{Child, Command};
 
 use voicectl_core::events::{AgentDispatch, AgentReply, AgentToken, RequestId};
 
-const NATS_URL: &str = "nats://lnx-rig:4222";
+const NATS_URL: &str = "nats://localhost:4222";
 const TEST_AGENT: &str = "agnt-bridge-streamtest";
 
 fn workspace_root() -> PathBuf {
@@ -87,7 +87,7 @@ impl Drop for ChildGuard {
 }
 
 #[tokio::test]
-#[ignore = "spawns agnt-bridge against ubu vLLM + lnx-rig NATS; \
+#[ignore = "spawns agnt-bridge against local vLLM + localhost NATS; \
             run with --ignored, NATS_USER + NATS_PASSWORD + LITELLM_API_KEY"]
 async fn streaming_token_bridge_round_trip() {
     assert!(std::env::var("NATS_USER").is_ok(), "NATS_USER required");

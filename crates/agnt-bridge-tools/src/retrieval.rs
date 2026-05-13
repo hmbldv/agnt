@@ -2,7 +2,7 @@
 //! LiteLLM (nomic-embed-text for embeddings, bge-reranker for reranking).
 //!
 //! Both tools hit the LiteLLM proxy at a configurable base URL (default:
-//! `http://100.80.135.46:4000/v1`). They are intentionally independent so
+//! `http://localhost:4000/v1`). They are intentionally independent so
 //! the agent can call either one without the other.
 //!
 //! ## API shapes
@@ -33,7 +33,7 @@ use crate::shell::block_on;
 /// Configuration shared by the retrieval tools.
 #[derive(Clone, Debug)]
 pub struct RetrievalConfig {
-    /// LiteLLM proxy base URL. Default: `http://100.80.135.46:4000/v1`.
+    /// LiteLLM proxy base URL. Default: `http://localhost:4000/v1`.
     pub litellm_url: String,
     /// Embedding model name. Default: `nomic-embed-text`.
     pub embed_model: String,
@@ -50,7 +50,7 @@ pub struct RetrievalConfig {
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
-            litellm_url: "http://100.80.135.46:4000/v1".into(),
+            litellm_url: "http://localhost:4000/v1".into(),
             embed_model: "nomic-embed-text".into(),
             rerank_model: "bge-reranker".into(),
             api_key_env: "LITELLM_API_KEY".into(),

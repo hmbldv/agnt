@@ -24,6 +24,7 @@ impl LlmBackend for MockBackend {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            usage: None,
         })
     }
 }
@@ -40,6 +41,7 @@ fn make_agent(message_count: usize) -> Agent<MockBackend> {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            usage: None,
         });
     }
     a
@@ -70,15 +72,11 @@ fn bench_windowing(c: &mut Criterion) {
     // History longer than max_window — truncation path.
     for &size in &[200usize, 1000] {
         let agent = make_agent(size);
-        group.bench_with_input(
-            BenchmarkId::new("over_window", size),
-            &agent,
-            |b, agent| {
-                b.iter(|| {
-                    let _ = black_box(agent.messages.len());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("over_window", size), &agent, |b, agent| {
+            b.iter(|| {
+                let _ = black_box(agent.messages.len());
+            });
+        });
     }
 
     group.finish();

@@ -124,8 +124,8 @@ impl<T: TypedTool> Tool for ErasedAdapter<T> {
     }
 
     fn call(&self, args: Value) -> Result<String, String> {
-        let typed: T::Args = serde_json::from_value(args)
-            .map_err(|e| format!("args deserialize: {}", e))?;
+        let typed: T::Args =
+            serde_json::from_value(args).map_err(|e| format!("args deserialize: {}", e))?;
         let out = self.inner.call(typed).map_err(|e| e.to_string())?;
         serde_json::to_string(&out).map_err(|e| format!("output serialize: {}", e))
     }
@@ -272,7 +272,9 @@ mod tests {
             })
         }
         fn call(&self, args: AddArgs) -> Result<AddOut, String> {
-            Ok(AddOut { sum: args.a + args.b })
+            Ok(AddOut {
+                sum: args.a + args.b,
+            })
         }
     }
 

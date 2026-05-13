@@ -1,4 +1,4 @@
-use agnt::{Agent, Backend, MessageStore, Tool, builtins, store};
+use agnt::{builtins, store, Agent, Backend, MessageStore, Tool};
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
@@ -153,7 +153,10 @@ fn main() {
                 Some(s) => match s.stats(&agent.session) {
                     Ok(rows) if rows.is_empty() => println!("(no tool calls in this session yet)"),
                     Ok(rows) => {
-                        println!("{:<12} {:>6} {:>12} {:>12}", "tool", "count", "avg_us", "max_us");
+                        println!(
+                            "{:<12} {:>6} {:>12} {:>12}",
+                            "tool", "count", "avg_us", "max_us"
+                        );
                         for (name, count, avg, max) in rows {
                             println!("{:<12} {:>6} {:>12} {:>12}", name, count, avg, max);
                         }

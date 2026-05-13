@@ -11,6 +11,7 @@ members = [
     "crates/agnt-engine",
     "crates/agnt-bridge",
     "crates/agnt-bridge-tools",
+    "crates/agnt-eval",
     "crates/cc-bridge",
     "crates/agnt-toolgnrtr",
     ".",

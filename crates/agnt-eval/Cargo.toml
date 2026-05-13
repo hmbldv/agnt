@@ -1,0 +1,13 @@
+[package]
+name = "agnt-eval"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "agnt-eval"
+path = "src/main.rs"
+
+[dependencies]
+agnt = { path = "../agnt", features = ["net", "tools"] }
+serde_json = "1"

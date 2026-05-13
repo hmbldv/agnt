@@ -103,7 +103,7 @@ pub struct ToolsSection {
     /// names are warn-logged at startup, not fatal.
     #[serde(default)]
     pub enabled: Vec<String>,
-    /// SearXNG base URL for `web_search`. Default: `http://lnx-rig:8888`.
+    /// SearXNG base URL for `web_search`. Default: `http://localhost:8888`.
     #[serde(default)]
     pub searxng_url: Option<String>,
     /// Path to `memctl`. Default: `~/.local/bin/memctl`.
@@ -131,7 +131,7 @@ pub struct ToolsSection {
     #[serde(default)]
     pub computer_use_safe_focus_apps: Option<Vec<String>>,
     /// Vision-LLM endpoint for `look_at_screen` (OpenAI-compatible
-    /// chat-completions URL). Default: `http://lnx-rig:8002/v1/chat/completions`.
+    /// chat-completions URL). Default: `http://localhost:8002/v1/chat/completions`.
     /// Retained for backward-compat but silently ignored — look_at_screen now
     /// dispatches over NATS to vznd, not directly to a model.
     #[serde(default)]
@@ -287,7 +287,7 @@ vault_root = "~/Documents/Squinks"
 enabled = ["read_file", "grep"]
 
 [bus]
-nats_url = "nats://lnx-rig:4222"
+nats_url = "nats://localhost:4222"
 user_env = "NATS_USER"
 password_env = "NATS_PASSWORD"
 subscribe_subject = "agent.dispatch.sage"
@@ -338,7 +338,7 @@ api_key_env = "UNUSED"
 system_file = "/dev/null"
 
 [bus]
-nats_url = "nats://lnx-rig:4222"
+nats_url = "nats://localhost:4222"
 subscribe_subject = "agent.dispatch.sage"
 publish_prefix = "agent.event.sage"
 "#;
@@ -365,7 +365,7 @@ api_key_env = "UNUSED"
 system_file = "/dev/null"
 
 [bus]
-nats_url = "nats://lnx-rig:4222"
+nats_url = "nats://localhost:4222"
 subscribe_subject = "agent.dispatch.echo"
 publish_prefix = "agent.event.echo"
 "#;

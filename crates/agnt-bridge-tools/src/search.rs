@@ -256,9 +256,9 @@ mod tests {
     // Live integration test — requires SearXNG reachable at the configured URL.
     // Run with: cargo test -p agnt-bridge-tools --test … -- --ignored
     #[tokio::test]
-    #[ignore = "requires live SearXNG at http://lnx-rig:8888"]
+    #[ignore = "requires live SearXNG at http://localhost:8888"]
     async fn live_searxng_returns_results() {
-        let body = fetch_searxng("http://lnx-rig:8888", "rust programming language")
+        let body = fetch_searxng("http://localhost:8888", "rust programming language")
             .await
             .expect("fetch");
         let parsed: SxResponse = serde_json::from_str(&body).expect("decode");

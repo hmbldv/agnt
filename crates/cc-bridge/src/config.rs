@@ -236,22 +236,22 @@ name = "codex"
 subject_root = "cc"
 
 [bus]
-nats_url = "nats://lnx-rig:4222"
+nats_url = "nats://localhost:4222"
 user_env = "NATS_USER"
 password_env = "NATS_PASSWORD"
 
 [[personas]]
 name = "archon"
-host = "lnx-rig"
-cwd = "/home/squinks/projects"
+host = "build-server"
+cwd = "/home/user/projects"
 permission_mode = "bypassPermissions"
 system_prompt_file = "~/.config/voicectl/cc/prompts/archon.md"
 daily_cost_limit_usd = 5.00
 
 [[personas]]
 name = "scalpel"
-host = "ubu"
-cwd = "/home/doop/Repositories"
+host = "dev-machine"
+cwd = "/home/user/Repositories"
 permission_mode = "acceptEdits"
 "#;
 
@@ -262,12 +262,12 @@ permission_mode = "acceptEdits"
         assert_eq!(cfg.bridge.subject_root, "cc");
         assert_eq!(cfg.personas.len(), 2);
         let archon = cfg.persona("archon").unwrap();
-        assert_eq!(archon.host, "lnx-rig");
+        assert_eq!(archon.host, "build-server");
         assert_eq!(archon.permission_mode, "bypassPermissions");
         assert_eq!(archon.daily_cost_limit_usd, Some(5.00));
         assert_eq!(archon.timeout_sec, 600);
         let scalpel = cfg.persona("scalpel").unwrap();
-        assert_eq!(scalpel.host, "ubu");
+        assert_eq!(scalpel.host, "dev-machine");
         assert!(scalpel.daily_cost_limit_usd.is_none());
     }
 
@@ -302,7 +302,7 @@ permission_mode = "acceptEdits"
 name = "empty"
 
 [bus]
-nats_url = "nats://lnx-rig:4222"
+nats_url = "nats://localhost:4222"
 "#;
         let cfg = CcBridgeConfig::from_toml_str(toml).expect("parse");
         let err = cfg.validate().unwrap_err();
@@ -349,8 +349,8 @@ nats_url = "nats://lnx-rig:4222"
         assert!(mk("").is_local());
         assert!(mk("localhost").is_local());
         assert!(mk("127.0.0.1").is_local());
-        assert!(!mk("lnx-rig").is_local());
-        assert!(!mk("ubu").is_local());
+        assert!(!mk("build-server").is_local());
+        assert!(!mk("dev-machine").is_local());
     }
 
     #[test]

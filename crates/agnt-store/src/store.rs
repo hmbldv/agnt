@@ -171,9 +171,7 @@ impl Store {
                 )
                 .map_err(|e| e.to_string())?;
             let mut stmt = tx
-                .prepare_cached(
-                    "INSERT INTO messages (session, idx, json) VALUES (?1, ?2, ?3)",
-                )
+                .prepare_cached("INSERT INTO messages (session, idx, json) VALUES (?1, ?2, ?3)")
                 .map_err(|e| e.to_string())?;
             for json in &jsons {
                 stmt.execute(params![session, next, json])
@@ -246,7 +244,8 @@ impl Store {
                 ))
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
     }
 
     /// Record token usage for a single message in a session.
@@ -266,8 +265,14 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .map_err(|e| e.to_string())?;
-        stmt.execute(params![session, message_idx, prompt as i64, completion as i64, total])
-            .map_err(|e| e.to_string())?;
+        stmt.execute(params![
+            session,
+            message_idx,
+            prompt as i64,
+            completion as i64,
+            total
+        ])
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -285,7 +290,11 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         stmt.query_row(params![session], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })
         .map_err(|e| e.to_string())
     }
@@ -301,8 +310,15 @@ impl MessageStore for Store {
     }
 
     fn log_tool(&self, session: &str, log: &ToolLog<'_>) -> Result<(), StoreError> {
-        Store::log_tool(self, session, log.name, log.args, log.result, log.duration_us)
-            .map_err(io_err)
+        Store::log_tool(
+            self,
+            session,
+            log.name,
+            log.args,
+            log.result,
+            log.duration_us,
+        )
+        .map_err(io_err)
     }
 
     fn clear(&self, session: &str) -> Result<(), StoreError> {
@@ -334,6 +350,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            usage: None,
         }
     }
 

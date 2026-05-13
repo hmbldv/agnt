@@ -235,4 +235,3 @@ fn snake_to_pascal(s: &str) -> String {
     }
     out
 }
-

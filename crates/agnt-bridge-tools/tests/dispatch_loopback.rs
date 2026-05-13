@@ -7,7 +7,7 @@
 //! asserts the reply text round-trips correctly.
 //!
 //! Why ignored:
-//! - Requires NATS reachable at `nats://lnx-rig:4222` with `NATS_USER` /
+//! - Requires NATS reachable at `nats://localhost:4222` with `NATS_USER` /
 //!   `NATS_PASSWORD` set.
 //!
 //! Run:
@@ -26,10 +26,10 @@ use voicectl_core::config::BusConfig;
 use voicectl_core::events::{AgentDispatch, AgentReply};
 use voicectl_net::Bus;
 
-const NATS_URL: &str = "nats://lnx-rig:4222";
+const NATS_URL: &str = "nats://localhost:4222";
 
 #[tokio::test]
-#[ignore = "requires live NATS at lnx-rig:4222 with NATS_USER + NATS_PASSWORD"]
+#[ignore = "requires live NATS at localhost:4222 with NATS_USER + NATS_PASSWORD"]
 async fn dispatch_agent_round_trip_against_loopback_echo() {
     assert!(std::env::var("NATS_USER").is_ok(), "NATS_USER required");
     assert!(

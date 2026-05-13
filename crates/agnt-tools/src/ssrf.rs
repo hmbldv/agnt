@@ -148,7 +148,10 @@ impl SsrfResolver {
 impl ureq::Resolver for SsrfResolver {
     fn resolve(&self, netloc: &str) -> io::Result<Vec<SocketAddr>> {
         let (raw_host, _) = netloc.rsplit_once(':').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("bad netloc: {}", netloc))
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("bad netloc: {}", netloc),
+            )
         })?;
         // IPv6 literals arrive bracketed: "[::1]:443". Strip for comparison.
         let host = raw_host
@@ -260,8 +263,7 @@ mod tests {
         // We reject the whole batch — better safe than routing-dependent.
         let public: SocketAddr = "93.184.216.34:80".parse().unwrap();
         let private: SocketAddr = "10.0.0.1:80".parse().unwrap();
-        let err = SsrfResolver::validate_addrs("dual.example", &[public, private])
-            .unwrap_err();
+        let err = SsrfResolver::validate_addrs("dual.example", &[public, private]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 

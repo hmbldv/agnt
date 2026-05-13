@@ -3,3 +3,6 @@ target/
 *.db-journal
 .DS_Store
 bench.sh.swp
+
+# Claude Code worktrees / scratch
+.claude/

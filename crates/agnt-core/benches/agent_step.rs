@@ -26,6 +26,7 @@ impl LlmBackend for MockBackend {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            usage: None,
         })
     }
 }
@@ -42,6 +43,7 @@ fn make_agent(prior_count: usize) -> Agent<MockBackend> {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            usage: None,
         });
     }
     a
