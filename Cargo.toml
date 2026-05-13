@@ -12,6 +12,7 @@ members = [
     "crates/agnt-bridge",
     "crates/agnt-bridge-tools",
     "crates/cc-bridge",
+    "crates/agnt-toolgnrtr",
     ".",
 ]
 

@@ -69,11 +69,21 @@ fn parse_field(field: &str, min: u32, max: u32) -> Option<Vec<u32>> {
             let mut parts = part.split('-');
             let start: u32 = parts.next()?.parse().ok()?;
             let end: u32 = parts.next()?.parse().ok()?;
+            // Reject ranges that exceed the field's valid bounds before
+            // allocating a Vec — an unchecked range like "0-999999999"
+            // would cause a multi-gigabyte allocation (M1).
+            if start < min || end > max || start > end {
+                return None;
+            }
             for v in start..=end {
                 values.push(v);
             }
         } else {
             let v: u32 = part.parse().ok()?;
+            // Reject single values outside the valid field range (M1).
+            if v < min || v > max {
+                return None;
+            }
             values.push(v);
         }
     }

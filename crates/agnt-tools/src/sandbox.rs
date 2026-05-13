@@ -26,6 +26,11 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct FilesystemRoot {
     root: PathBuf,
+    /// Paths (canonicalized at construction time) that are explicitly denied,
+    /// regardless of whether they fall under the sandbox root. Checked after
+    /// the root-containment guard so operators can lock out sensitive sub-trees
+    /// (e.g. `.ssh/`, `.gnupg/`) even when those trees are inside the root.
+    denylist: Vec<PathBuf>,
 }
 
 impl FilesystemRoot {
@@ -36,7 +41,19 @@ impl FilesystemRoot {
         let root = root.into();
         let canonical = std::fs::canonicalize(&root)
             .map_err(|e| format!("sandbox root {}: {}", root.display(), e))?;
-        Ok(Self { root: canonical })
+        Ok(Self { root: canonical, denylist: Vec::new() })
+    }
+
+    /// Reject any resolved path that falls under one of the given entries,
+    /// regardless of where the sandbox root sits. Entries are canonicalized at
+    /// construction time; non-existent entries use the raw path.
+    pub fn with_denylist(mut self, entries: Vec<impl AsRef<Path>>) -> Result<Self, String> {
+        for entry in entries {
+            let p = entry.as_ref();
+            let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            self.denylist.push(canonical);
+        }
+        Ok(self)
     }
 
     /// Return the canonical root directory.
@@ -52,18 +69,22 @@ impl FilesystemRoot {
     /// - any path whose components contain `..`
     /// - any path that canonicalizes outside the root (symlink escape)
     /// - for new files: any parent path that escapes the root
-    pub fn resolve(&self, input: &str) -> Result<PathBuf, String> {
-        if input.is_empty() {
+    /// - any path that falls under a denylist entry (see [`with_denylist`])
+    ///
+    /// [`with_denylist`]: FilesystemRoot::with_denylist
+    pub fn resolve(&self, input: impl AsRef<Path>) -> Result<PathBuf, String> {
+        let input = input.as_ref();
+        if input.as_os_str().is_empty() {
             return Err("empty path".into());
         }
-        let raw = Path::new(input);
+        let raw = input;
 
         // Reject explicit `..` components before touching the filesystem — this
         // avoids relying on canonicalize() alone (which can still be tricked by
         // symlink chains that happen to land back under the root).
         for comp in raw.components() {
             if matches!(comp, Component::ParentDir) {
-                return Err(format!("path contains '..': {}", input));
+                return Err(format!("path contains '..': {}", input.display()));
             }
         }
 
@@ -85,6 +106,18 @@ impl FilesystemRoot {
                     self.root.display()
                 ));
             }
+            // Check denylist after confirming the path is under the root so
+            // operators can lock out sensitive sub-trees (e.g. .ssh/) without
+            // touching the root-containment logic. The "denied:" prefix lets
+            // log consumers distinguish this error from escape-sandbox errors.
+            for denied in &self.denylist {
+                if canonical.starts_with(denied) {
+                    return Err(format!(
+                        "denied: path is under denylist entry {}",
+                        denied.display()
+                    ));
+                }
+            }
             return Ok(canonical);
         }
 
@@ -92,16 +125,16 @@ impl FilesystemRoot {
         // canonicalize the parent and rejoin the filename.
         let parent = joined
             .parent()
-            .ok_or_else(|| format!("path has no parent: {}", input))?;
+            .ok_or_else(|| format!("path has no parent: {}", input.display()))?;
         let file_name = joined
             .file_name()
-            .ok_or_else(|| format!("path has no filename: {}", input))?;
+            .ok_or_else(|| format!("path has no filename: {}", input.display()))?;
 
         let parent_canonical = std::fs::canonicalize(parent).map_err(|e| {
             format!(
                 "sandbox parent {} of {}: {}",
                 parent.display(),
-                input,
+                input.display(),
                 e
             )
         })?;
@@ -211,5 +244,52 @@ mod tests {
             let err = sandbox.resolve("link/secret.txt").unwrap_err();
             assert!(err.contains("escape") || err.contains("sandbox"));
         }
+    }
+
+    // ---- Denylist tests -------------------------------------------------------------------
+
+    #[test]
+    fn denylist_rejects_path_under_denied_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deny = tmp.path().join(".ssh");
+        std::fs::create_dir_all(&deny).unwrap();
+        std::fs::write(deny.join("id_rsa"), b"fake").unwrap();
+        let root = FilesystemRoot::new(tmp.path())
+            .unwrap()
+            .with_denylist(vec![deny.clone()])
+            .unwrap();
+        let err = root.resolve(deny.join("id_rsa")).unwrap_err();
+        assert!(err.contains("denied"), "got: {}", err);
+    }
+
+    #[test]
+    fn denylist_allows_sibling_of_denied_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deny = tmp.path().join(".ssh");
+        let ok = tmp.path().join("notes");
+        std::fs::create_dir_all(&deny).unwrap();
+        std::fs::create_dir_all(&ok).unwrap();
+        std::fs::write(ok.join("hello.md"), b"hi").unwrap();
+        let root = FilesystemRoot::new(tmp.path())
+            .unwrap()
+            .with_denylist(vec![deny])
+            .unwrap();
+        assert!(root.resolve(ok.join("hello.md")).is_ok());
+    }
+
+    #[test]
+    fn denylist_with_symlink_entering_denied_area_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deny = tmp.path().join(".secrets");
+        std::fs::create_dir_all(&deny).unwrap();
+        std::fs::write(deny.join("key"), b"k").unwrap();
+        let link = tmp.path().join("shortcut");
+        std::os::unix::fs::symlink(&deny, &link).unwrap();
+        let root = FilesystemRoot::new(tmp.path())
+            .unwrap()
+            .with_denylist(vec![deny])
+            .unwrap();
+        let err = root.resolve(link.join("key")).unwrap_err();
+        assert!(err.contains("denied"), "got: {}", err);
     }
 }

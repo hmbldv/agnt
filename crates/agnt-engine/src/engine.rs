@@ -113,10 +113,10 @@ pub async fn run_agent<B: LlmBackend + 'static>(
             .observer(observer)
             .build();
 
-        let mut agent = match agent {
+        let mut agent: Option<Agent<B>> = match agent {
             Ok(mut a) => {
                 a.tools = registry;
-                a
+                Some(a)
             }
             Err(e) => {
                 warn!(error = %e, "failed to build agent");
@@ -173,6 +173,21 @@ pub async fn run_agent<B: LlmBackend + 'static>(
             }
 
             ExecutionMode::Loop { interval_secs, max_iterations } => {
+                // Reject interval_secs = 0 early — a zero-interval loop is a
+                // tight spin that saturates the CPU and provides no useful
+                // behaviour.  Fail fast here rather than deep in the loop body.
+                if *interval_secs == 0 {
+                    warn!("Loop mode rejected: interval_secs must be >= 1");
+                    return EngineResult {
+                        reason: TerminalReason::ModelError,
+                        tasks_completed: 0,
+                        tasks_failed: 0,
+                        total_attempts: 0,
+                        credits_consumed: 0,
+                        last_result: Some("interval_secs must be >= 1".into()),
+                    };
+                }
+
                 let mut iteration = 0u32;
                 loop {
                     if max_iterations.map_or(false, |max| iteration >= max) {
@@ -242,15 +257,31 @@ enum StepResult {
 }
 
 /// Execute a single task payload with retry + recovery cascade.
+///
+/// `agent` is passed as `&mut Option<Agent<B>>` so we can move it into
+/// `spawn_blocking` (which requires `'static + Send`) and return it after the
+/// step completes.  The `Option` is always `Some` on entry and on any path
+/// where the agent is still valid.  On timeout the spawned thread holds the
+/// agent — we cannot get it back without waiting — so we accept the loss and
+/// leave the slot `None`; the caller (the mode loop) terminates immediately
+/// after a `StepResult::Failed`, so the `None` is never accessed again.
 async fn execute_task<B: LlmBackend + 'static>(
     task: &Task,
     payload: &TaskPayload,
-    agent: &mut Agent<B>,
+    agent: &mut Option<Agent<B>>,
     state: &mut EngineState,
     shutdown: &Arc<Notify>,
     ttl: chrono::DateTime<chrono::Utc>,
 ) -> StepResult {
     let mut consecutive_low_progress = 0u32;
+
+    // Validate attempt_timeout_secs once, before the retry loop.
+    // Zero is treated as "use the default" (300s / 5 minutes).
+    let attempt_timeout_secs = {
+        let raw = task.terminal.attempt_timeout_secs;
+        if raw == 0 { 300 } else { raw }
+    };
+    let timeout_dur = Duration::from_secs(attempt_timeout_secs);
 
     for attempt in 0..=task.retry.max_retries {
         state.total_attempts += 1;
@@ -264,17 +295,52 @@ async fn execute_task<B: LlmBackend + 'static>(
             return StepResult::Failed(TerminalReason::BudgetExhausted);
         }
 
-        // Bridge sync Agent::step() to async via spawn_blocking.
-        // We need to move the agent into the blocking task and back.
         let instructions = payload.instructions.clone();
-        let timeout_secs = task.terminal.attempt_timeout_secs;
 
-        // Agent::step() is sync and uses blocking HTTP (ureq).
-        // block_in_place tells tokio this will block, allowing it to
-        // schedule other tasks on other workers.
-        let step_result = tokio::task::block_in_place(|| {
-            agent.step(&instructions)
+        // Agent::step() is sync and blocks on network I/O (ureq).
+        // spawn_blocking hands it off to a dedicated blocking thread pool,
+        // making it cancellable by tokio::time::timeout.  Agent<B> is Send
+        // because LlmBackend: Send + Sync (trait bound), Observer: Send + Sync,
+        // MessageStore: Send + Sync, Tool: Send + Sync, and on_token is
+        // Option<Box<dyn FnMut + Send>>.
+        //
+        // We move the agent out of the Option into the closure, then return it
+        // alongside the step result so we can restore it after each attempt.
+        let moved_agent = agent.take().expect("agent must be Some at step entry");
+
+        let handle = tokio::task::spawn_blocking(move || {
+            let mut a = moved_agent;
+            let result = a.step(&instructions);
+            (a, result) // always return the agent so the caller can restore it
         });
+
+        let timed = tokio::time::timeout(timeout_dur, handle).await;
+
+        let step_result: Result<String, String> = match timed {
+            Err(_elapsed) => {
+                // Timeout fired.  The blocking thread may still be running;
+                // we cannot retrieve the agent from it without blocking
+                // indefinitely.  Leave the slot None — the callers below
+                // return StepResult::Failed immediately after this path, so
+                // the None is never dereferenced.
+                warn!(
+                    attempt,
+                    timeout_secs = attempt_timeout_secs,
+                    "agent step timed out"
+                );
+                Err(format!("timeout after {}s", attempt_timeout_secs))
+            }
+            Ok(Err(join_err)) => {
+                // The blocking thread panicked.  We cannot recover the agent.
+                tracing::error!(attempt, panic = %join_err, "agent step thread panicked");
+                Err(format!("agent thread panicked: {}", join_err))
+            }
+            Ok(Ok((returned_agent, result))) => {
+                // Happy path: restore the agent for the next iteration.
+                *agent = Some(returned_agent);
+                result
+            }
+        };
 
         match step_result {
             Ok(output) => {
@@ -306,31 +372,34 @@ async fn execute_task<B: LlmBackend + 'static>(
                 }
 
                 // If retries exhausted, try recovery cascade.
+                // Only attempt recovery if the agent is still available
+                // (it will be None after a timeout or panic).
                 if attempt == task.retry.max_retries {
-                    for step in &task.recovery.cascade {
-                        match step {
-                            RecoveryStep::TrimContext => {
-                                info!("recovery: trimming context");
-                                // Trim message history to max_window.
-                                let max = agent.max_window;
-                                if agent.messages.len() > max {
-                                    let drain = agent.messages.len() - max;
-                                    agent.messages.drain(1..=drain); // keep system prompt
+                    if let Some(ref mut a) = agent {
+                        for step in &task.recovery.cascade {
+                            match step {
+                                RecoveryStep::TrimContext => {
+                                    info!("recovery: trimming context");
+                                    let max = a.max_window;
+                                    if a.messages.len() > max {
+                                        let drain = a.messages.len() - max;
+                                        a.messages.drain(1..=drain); // keep system prompt
+                                    }
                                 }
-                            }
-                            RecoveryStep::Compact => {
-                                info!("recovery: compacting (clearing non-system messages)");
-                                agent.messages.truncate(1); // keep only system prompt
-                            }
-                            RecoveryStep::EscalateBudget => {
-                                info!("recovery: budget escalation (not connected to mesh)");
-                                // In standalone mode, no parent to escalate to.
-                                // In mesh mode, msh-gtwy handles this via NATS.
-                            }
-                            RecoveryStep::FallbackModel => {
-                                info!("recovery: fallback model (not implemented)");
-                                // Would require swapping the backend, which needs
-                                // a different Agent<B>. Deferred.
+                                RecoveryStep::Compact => {
+                                    info!("recovery: compacting (clearing non-system messages)");
+                                    a.messages.truncate(1); // keep only system prompt
+                                }
+                                RecoveryStep::EscalateBudget => {
+                                    info!("recovery: budget escalation (not connected to mesh)");
+                                    // In standalone mode, no parent to escalate to.
+                                    // In mesh mode, msh-gtwy handles this via NATS.
+                                }
+                                RecoveryStep::FallbackModel => {
+                                    info!("recovery: fallback model (not implemented)");
+                                    // Would require swapping the backend, which needs
+                                    // a different Agent<B>. Deferred.
+                                }
                             }
                         }
                     }
@@ -354,7 +423,12 @@ async fn execute_task<B: LlmBackend + 'static>(
 }
 
 /// Classify an error string into an ErrorClass for retry decisions.
+///
+/// Input is truncated to 256 bytes before any pattern matching.  This prevents
+/// an adversarial model from manipulating retry behaviour by injecting
+/// classification keywords into an arbitrarily long error payload (H2).
 fn classify_error(error: &str) -> ErrorClass {
+    let error = &error[..error.len().min(256)]; // truncate before any pattern matching
     let lower = error.to_lowercase();
     if lower.contains("timeout") || lower.contains("connection") || lower.contains("econnreset") {
         ErrorClass::Network

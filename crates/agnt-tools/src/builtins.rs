@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::sandbox::{FilesystemRoot, SandboxedPath};
 
@@ -792,6 +793,14 @@ pub struct Fetch {
     agent: std::sync::OnceLock<ureq::Agent>,
 }
 
+/// Connect timeout for the Fetch tool's ureq agent. A stalled TCP handshake
+/// should never pin a tool call longer than this.
+pub const FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Read timeout for the Fetch tool's ureq agent. Tighter than the backend's
+/// 120s because tool calls are interactive — 30s is enough for any real page.
+pub const FETCH_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 const FETCH_DEFAULT_MAX: usize = 64 * 1024;
 
 impl Default for Fetch {
@@ -834,7 +843,9 @@ impl Fetch {
             };
             let builder = ureq::AgentBuilder::new()
                 .resolver(resolver)
-                .redirects(0);
+                .redirects(0)
+                .timeout_connect(FETCH_CONNECT_TIMEOUT)
+                .timeout_read(FETCH_READ_TIMEOUT);
             match native_tls::TlsConnector::new() {
                 Ok(connector) => builder.tls_connector(Arc::new(connector)).build(),
                 Err(_) => builder.build(),
@@ -1067,6 +1078,31 @@ mod tests {
         let tool = Fetch::new();
         let err = tool.call(json!({"url":"http://[fc00::1]/"})).unwrap_err();
         assert!(err.contains("IPv6") || err.contains("fc00"), "got: {}", err);
+    }
+
+    // ---- Fetch timeout constants ---------------------------------------------------------
+
+    #[test]
+    fn fetch_agent_builder_sets_both_timeouts() {
+        let fetch = Fetch::new();
+        let _ = fetch.agent(); // must not panic
+        assert!(FETCH_CONNECT_TIMEOUT.as_secs() > 0);
+        assert!(FETCH_READ_TIMEOUT.as_secs() > 0);
+        assert!(FETCH_READ_TIMEOUT >= FETCH_CONNECT_TIMEOUT);
+    }
+
+    #[test]
+    #[ignore] // environment-dependent; requires a routable-but-silent target
+    fn fetch_connect_timeout_fires_on_unreachable_host() {
+        let fetch = Fetch::new().with_allow_hosts(vec!["192.0.2.1".into()]);
+        let start = std::time::Instant::now();
+        let _ = fetch.call(serde_json::json!({"url": "http://192.0.2.1/"}));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "expected connect cap near 10s, got {:?}",
+            elapsed
+        );
     }
 
     // ---- S6: EditFile atomicity ----------------------------------------------------------

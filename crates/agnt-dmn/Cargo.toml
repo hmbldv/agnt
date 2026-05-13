@@ -1,7 +1,8 @@
 [package]
 name = "agnt-dmn"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+rust-version = "1.75"
 description = "Edge daemon wrapping agnt-core in an HTTP server for multi-machine agent workflows"
 license = "MIT OR Apache-2.0"
 
