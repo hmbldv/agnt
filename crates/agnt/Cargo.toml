@@ -27,6 +27,7 @@ tools-bwrap-shell = ["tools-shell", "agnt-tools/bwrap-shell"]
 macros = ["dep:agnt-macros"]
 mcp = ["dep:agnt-mcp"]
 engine = ["dep:agnt-engine"]
+toolgen = ["dep:agnt-toolgnrtr"]
 
 [dependencies]
 agnt-core = { version = "0.3", path = "../agnt-core" }
@@ -36,3 +37,4 @@ agnt-tools = { version = "0.3", path = "../agnt-tools", optional = true }
 agnt-macros = { version = "0.3", path = "../agnt-macros", optional = true }
 agnt-mcp = { version = "0.3", path = "../agnt-mcp", optional = true }
 agnt-engine = { version = "0.1", path = "../agnt-engine", optional = true }
+agnt-toolgnrtr = { version = "0.1", path = "../agnt-toolgnrtr", optional = true }

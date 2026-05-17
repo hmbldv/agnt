@@ -75,12 +75,21 @@ struct ScenarioResult {
 
 // ── Agent factory ─────────────────────────────────────────────────────────────
 
+fn backend() -> agnt::Backend {
+    let model = std::env::var("AGNT_MODEL").unwrap_or_else(|_| "gemma4".into());
+    let base_url = std::env::var("AGNT_BASE_URL")
+        .unwrap_or_else(|_| "http://100.80.135.46:4000/v1".into());
+    let key = std::env::var("AGNT_API_KEY")
+        .or_else(|_| std::env::var("LITELLM_API_KEY"))
+        .unwrap_or_else(|_| "none".into());
+    agnt::Backend::openai(&model, &key).with_base_url(&base_url)
+}
+
 fn make_agent(metrics: Arc<Metrics>, workdir: &str) -> Agent<agnt::Backend>
 where
     Metrics: Observer,
 {
-    let backend = agnt::Backend::openai("gemma4-26b", &std::env::var("LITELLM_API_KEY").unwrap_or_else(|_| "none".into()))
-        .with_base_url("http://localhost:8001/v1");
+    let backend = backend();
     let sandbox = Arc::new(agnt::FilesystemRoot::new(workdir).expect("sandbox"));
     let mut agent = Agent::new(
         backend,
@@ -212,7 +221,10 @@ fn reply_contains(reply: &str, needle: &str) -> Result<(), String> {
 
 fn print_report(results: &[ScenarioResult]) {
     println!("# agnt End-to-End Eval Report\n");
-    println!("Model: `gemma4-26b` @ `localhost:8001`  ");
+    let model = std::env::var("AGNT_MODEL").unwrap_or_else(|_| "gemma4".into());
+    let base_url = std::env::var("AGNT_BASE_URL")
+        .unwrap_or_else(|_| "http://100.80.135.46:4000/v1".into());
+    println!("Model: `{}` @ `{}`  ", model, base_url);
     println!("Date: `{}`\n", chrono_now());
 
     println!("## Summary\n");
@@ -534,8 +546,7 @@ fn main() {
     // First, fill the agent's context with a few back-and-forth exchanges by
     // reusing the same agent across multiple prompts, then test coherence.
     {
-        let backend = agnt::Backend::openai("gemma4-26b", &std::env::var("LITELLM_API_KEY").unwrap_or_else(|_| "none".into()))
-            .with_base_url("http://localhost:8001/v1");
+        let backend = backend();
         let sandbox = Arc::new(agnt::FilesystemRoot::new(workdir).expect("sandbox"));
         let metrics = Metrics::new();
         let mut agent = Agent::new(

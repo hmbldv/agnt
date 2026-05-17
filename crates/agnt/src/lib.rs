@@ -135,3 +135,14 @@ pub mod mcp {
 pub mod engine {
     pub use agnt_engine::*;
 }
+
+// WASM-sandboxed tool generation: ask the LLM for Rust source, compile to
+// wasm32-wasip1, version in SQLite, execute through wasmtime. Generated tools
+// implement agnt_core::Tool and slot into any Registry.
+#[cfg(feature = "toolgen")]
+pub mod toolgen {
+    pub use agnt_toolgnrtr::{
+        GeneratedSpec, Generator, SandboxConfig, ScriptTool, TestCase, ToolGenerator, ToolRecord,
+        ToolStats, ToolStore, ToolSummary, WasmCompiler,
+    };
+}
